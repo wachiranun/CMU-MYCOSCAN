@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mycoscan"
+version = "0.1.0"
+description = "CMU MycoScan component 2: fungal colony and microscopy image classification"
+requires-python = ">=3.11"
+dependencies = [
+    "torch==2.14.1",
+    "torchvision==0.29.1",
+    "numpy==2.4.6",
+    "pandas==3.0.6",
+    "scipy==1.17.1",
+    "pillow==12.3.0",
+    "matplotlib==3.11.2",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1"]
+dev = [
+    "pytest==9.1.1",
+    "ipython>=8.0.0",
+    "ipykernel>=6.0.0",
+]
+
+[project.scripts]
+mycoscan = "mycoscan.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

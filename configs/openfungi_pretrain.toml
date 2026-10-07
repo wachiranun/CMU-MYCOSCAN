@@ -1,0 +1,12 @@
+# Stage 1 of staged transfer: ImageNet -> OpenFungi (5 genera, colony + microscopic).
+# Only the backbone of this model is carried into stage 2, so the last block is unfrozen here.
+run_name = "openfungi_densenet121"
+manifest = "data/openfungi/manifest.csv"
+source = "openfungi"
+modality = "all"
+arch = "densenet121"
+weights = "imagenet"
+finetune = "partial"
+split = "holdout"
+epochs = 20
+lr = 3e-4

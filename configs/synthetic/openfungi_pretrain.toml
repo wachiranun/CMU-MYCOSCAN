@@ -1,0 +1,14 @@
+# Synthetic stand-in for stage 1. Results say nothing about real fungi.
+run_name = "syn_openfungi"
+manifest = "data/synthetic/manifest.csv"
+output_dir = "runs/synthetic"
+source = "openfungi"
+modality = "all"
+weights = "imagenet"
+finetune = "partial"
+split = "holdout"
+image_size = 112
+epochs = 8
+batch_size = 16
+lr = 3e-4
+bootstrap = 200

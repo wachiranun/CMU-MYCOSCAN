@@ -1,0 +1,15 @@
+# Synthetic stand-in for stage 2 (colony). Results say nothing about real fungi.
+run_name = "syn_cmu_colony_head"
+manifest = "data/synthetic/manifest.csv"
+output_dir = "runs/synthetic"
+source = "cmu"
+modality = "colony"
+weights = "runs/synthetic/syn_openfungi/model.pt"
+finetune = "head"
+split = "kfold"
+n_folds = 5
+image_size = 112
+epochs = 4
+batch_size = 16
+lr = 1e-3
+bootstrap = 200
