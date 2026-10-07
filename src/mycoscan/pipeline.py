@@ -122,13 +122,15 @@ def plot_confusion(cm: list[list[int]], classes: list[str], path: Path, title: s
     plt.close(fig)
 
 
-def write_report(run_dir: Path, preds: pd.DataFrame, classes: list[str], n_boot: int, seed: int, extra: dict) -> dict:
+def write_report(run_dir: Path, preds: pd.DataFrame, classes: list[str], n_boot: int, seed: int, extra: dict,
+                 **metric_options) -> dict:
+    """metric_options: genus_map, order_map, subgroups and label_map, passed to evaluate_predictions."""
     preds.to_csv(run_dir / "predictions.csv", index=False)
-    metrics = {**extra, **evaluate_predictions(preds, classes, n_boot, seed)}
+    metrics = {**extra, **evaluate_predictions(preds, classes, n_boot, seed, **metric_options)}
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     flag = " (LEAKY, comparison only)" if extra.get("leaky") else ""
-    for level in ("image_level", "isolate_level"):
-        plot_confusion(metrics[level]["confusion_matrix"], classes, run_dir / f"confusion_{level}.png",
+    for level in ("isolate_level", "image_level"):
+        plot_confusion(metrics[level]["confusion_matrix"], metrics["scored_classes"], run_dir / f"confusion_{level}.png",
                        level.replace("_", " ") + flag)
     return metrics
 
@@ -139,6 +141,13 @@ def _resolve_classes(df: pd.DataFrame, cfg_classes: tuple[str, ...]) -> list[str
     if unknown:
         raise ValueError(f"manifest species not in config classes: {unknown}")
     return classes
+
+
+def genus_map_of(df: pd.DataFrame, overrides: dict) -> dict:
+    """species -> genus from the manifest's genus column, with the config's map taking precedence.
+    Read from the whole manifest, because a validation fold need not contain every class."""
+    named = df[df["genus"] != ""]
+    return {**named.groupby("species")["genus"].first().to_dict(), **overrides}
 
 
 def run_training(cfg: Config) -> Path:
@@ -196,7 +205,8 @@ def run_training(cfg: Config) -> Path:
                            {"split": cfg.split, "leaky": leaky, "provenance": provenance, "folds": fold_info,
                             "train_history": histories,
                             "note": "LEAKY, comparison only: groups shared between training and validation" if leaky
-                            else "validation predictions are out-of-fold, real images only, groups disjoint from training"})
+                            else "validation predictions are out-of-fold, real images only, groups disjoint from training"},
+                           genus_map=genus_map_of(df, cfg.genus_map), order_map=cfg.order_map, subgroups=cfg.subgroups)
     if cfg.split != "holdout" and cfg.fit_final:
         log.info("final model on all %d groups", df["group"].nunique())
         model, _ = fit_model(df, cfg, classes, device, cfg.seed)
@@ -211,17 +221,23 @@ def run_training(cfg: Config) -> Path:
 
 
 def evaluate_checkpoint(checkpoint: str | Path, manifest: str | Path, out_dir: str | Path, modality: str | None = None,
-                        source: str = "all", n_boot: int = 1000, device: str = "auto", seed: int = 0) -> dict:
-    """Score a saved model on a manifest it was not trained on (e.g. a later external test set)."""
+                        source: str = "all", n_boot: int = 2000, device: str = "auto", seed: int = 0,
+                        **metric_options) -> dict:
+    """Score a saved model on a manifest it was not trained on (e.g. a later external test set).
+
+    metric_options as for write_report; with a label_map the manifest's species are reference
+    labels mapped onto the model's classes, so they need not be model classes themselves."""
     device = resolve_device(device)
     model, meta = load_checkpoint(checkpoint, device)
     classes = meta["classes"]
     df = select(load_manifest(manifest), modality or meta.get("modality", "all"), source)
-    _resolve_classes(df, tuple(classes))
+    if not metric_options.get("label_map"):
+        _resolve_classes(df, tuple(classes))
+        metric_options["genus_map"] = genus_map_of(df, metric_options.get("genus_map", {}))
     probs = predict_probs(model, df, classes, meta["image_size"], meta["autocontrast"], device,
                           plate_crop=meta.get("plate_crop", False))
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     return write_report(out_dir, prediction_table(df, probs, classes, "eval"), classes, n_boot, seed,
                         {"checkpoint": str(checkpoint), "manifest": str(manifest),
-                         "provenance": collect(manifest, checkpoint=checkpoint)})
+                         "provenance": collect(manifest, checkpoint=checkpoint)}, **metric_options)

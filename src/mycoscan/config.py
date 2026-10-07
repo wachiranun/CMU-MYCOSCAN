@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from .models import PRETRAINED, resolve_weights
@@ -17,6 +17,7 @@ CHOICES = {
     "tracking": {"none", "mlflow"},
     "split": {"holdout", "kfold", "loio", "image_random"},
 }
+SUBGROUP_COLUMNS = {"modality", "view", "device", "day", "source", "genus", "temperature", "phase", "z_index"}
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,10 @@ class Config:
     num_workers: int = 0
     device: str = "auto"
     seed: int = 42
-    bootstrap: int = 1000
+    bootstrap: int = 2000
+    genus_map: dict = field(default_factory=dict)
+    order_map: dict = field(default_factory=dict)
+    subgroups: tuple[str, ...] = ()
     amp: bool = False
     grad_clip: float = 0.0
     tracking: str = "none"
@@ -76,6 +80,9 @@ class Config:
             raise ValueError("config grad_clip must be >= 0 (0 turns clipping off)")
         if self.splits_file and not Path(self.splits_file).is_file():
             raise ValueError(f"config splits_file={self.splits_file!r} does not exist")
+        bad = sorted(set(self.subgroups) - SUBGROUP_COLUMNS)
+        if bad:
+            raise ValueError(f"config subgroups {bad} are not manifest columns; expected some of {sorted(SUBGROUP_COLUMNS)}")
         if not 0 < self.val_fraction < 1:
             raise ValueError("config val_fraction must be in (0, 1)")
 
@@ -85,8 +92,9 @@ def _coerce(raw: dict) -> dict:
     unknown = set(raw) - known
     if unknown:
         raise ValueError(f"unknown config keys: {sorted(unknown)}")
-    if "classes" in raw:
-        raw = {**raw, "classes": tuple(raw["classes"])}
+    for key in ("classes", "subgroups"):
+        if key in raw:
+            raw = {**raw, key: tuple(raw[key])}
     return raw
 
 

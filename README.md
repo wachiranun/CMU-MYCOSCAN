@@ -110,7 +110,7 @@ Each run writes `runs/<run_name>/` with these files:
 |---|---|
 | `config.json` | the resolved config |
 | `predictions.csv` | one row per validation image, with out-of-fold probabilities for `kfold` and `loio` |
-| `metrics.json` | image-level and isolate-level metrics, per class and macro, 95% isolate-bootstrap CIs, fold composition, training curves, and a `provenance` block |
+| `metrics.json` | isolate-level (primary) and image-level (secondary) metrics: accuracy and Top-2 accuracy with Wilson 95% intervals, Cohen's kappa, per-class and macro sensitivity, specificity, PPV, NPV, F1 and AUC, 95% isolate-bootstrap CIs for every one of them, genus and order rollups, and subgroup blocks; plus fold composition, training curves and a `provenance` block |
 | `confusion_image_level.png`, `confusion_isolate_level.png` | confusion matrices |
 | `folds/<fold>.pt` | one checkpoint per fold (`kfold`, `loio`) |
 | `model.pt` | the deployable model. For `holdout` this is the model trained on 80% of isolates. For `kfold` and `loio` it is retrained on all isolates after cross-validation. |
@@ -149,6 +149,20 @@ mycoscan predict --checkpoint runs/<run>/model.pt image.jpg
 # Head-only against partial fine-tuning, image and isolate level, with 95% CIs
 mycoscan compare runs/cmu_microscopic_densenet121_head runs/cmu_micro_partial
 ```
+
+Three config keys shape the metric block. `genus_map` is a `[genus_map]` table of species to genus; when it is absent, the manifest's `genus` column is used, and a class with no genus skips the rollup with a reason in `taxonomic_rollup_skipped`. `order_map` (genus to order) adds an order-level rollup. `subgroups = ["device", "phase"]` repeats the whole report for each value of each column, under `subgroups` in `metrics.json`. `bootstrap` sets the number of resamples (2,000 by default).
+
+`mycoscan eval --metric-config metrics.toml` takes the same `genus_map`, `order_map` and `subgroups`, and also a `label_map` for an external set whose labels are coarser than the model's classes:
+
+```toml
+[label_map]
+Flavi = ["Aspergillus_flavus"]
+Nigri = ["Aspergillus_niger"]
+Fusarium = ["FSSC", "FOSC"]
+Rhizopus = ["Rhizopus"]
+```
+
+The model's probabilities are summed into each reference label. The model classes that no label covers go into an `unmapped` column, so predicting one of them counts as wrong. Rows whose reference label is not in the map are dropped. `metrics.json` names both under `label_mapping`.
 
 `review_sheet.csv` has one row per panel and empty columns for the reviewer to fill in: `reviewer`, `concordant_with_morphology`, `highlighted_structure`, `artifact_suspected`, `notes`.
 

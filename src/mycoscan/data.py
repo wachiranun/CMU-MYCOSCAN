@@ -57,7 +57,8 @@ def make_loader(df: pd.DataFrame, class_to_idx: dict[str, int], image_size: int,
                 augmentation: str = "standard", plate_crop: bool = False) -> DataLoader:
     if train:
         refuse_held_out(df)
-    labels = [class_to_idx[s] for s in df["species"]]
+    # Prediction ignores labels, and an external set's reference labels need not be model classes.
+    labels = [class_to_idx[s] if train else class_to_idx.get(s, -1) for s in df["species"]]
     ds = ImageDataset(df["image_path"].tolist(), labels, build_transform(image_size, autocontrast, train, augmentation),
                       df["modality"].tolist(), plate_crop)
     generator = torch.Generator().manual_seed(seed)

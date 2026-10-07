@@ -8,7 +8,7 @@ from mycoscan.config import Config
 from mycoscan.explain import explain_images, gradcam, smoothgrad
 from mycoscan.manifest import load_manifest, select
 from mycoscan.models import apply_finetune, build_model, save_checkpoint
-from mycoscan.pipeline import fit_model, run_training
+from mycoscan.pipeline import evaluate_checkpoint, fit_model, run_training
 from mycoscan.predict import Predictor
 from mycoscan.synthetic import PLACEHOLDER_CMU_CLASSES
 
@@ -86,3 +86,34 @@ def test_gradcam_and_saliency_are_unit_range_maps_even_with_frozen_backbone():
     assert cam.shape == sal.shape == (64, 64)
     assert (float(sal.min()), float(sal.max())) == (0.0, 1.0)
     assert (float(cam.min()), float(cam.max())) == (0.0, 1.0)
+
+
+def test_external_evaluation_scores_only_mapped_reference_labels(synthetic_manifest, tmp_path):
+    model = build_model("densenet121", len(PLACEHOLDER_CMU_CLASSES), "none")
+    save_checkpoint(tmp_path / "cmu.pt", model, "densenet121", list(PLACEHOLDER_CMU_CLASSES), 64, True,
+                    {"modality": "all"})
+    label_map = {"Aspergillus": ["Aspergillus_fumigatus", "Aspergillus_flavus", "Aspergillus_niger", "Aspergillus_terreus"],
+                 "Fusarium": ["Fusarium_spp"], "Penicillium": ["Penicillium_spp"]}
+    m = evaluate_checkpoint(tmp_path / "cmu.pt", synthetic_manifest, tmp_path / "eval", source="openfungi",
+                            n_boot=0, device="cpu", label_map=label_map)
+    openfungi = select(load_manifest(synthetic_manifest), "all", "openfungi")
+    mapped = openfungi[openfungi["species"].isin(label_map)]
+    assert m["scored_classes"] == ["Aspergillus", "Fusarium", "Penicillium", "unmapped"]
+    assert m["label_mapping"]["unmapped_reference_labels"] == ["Alternaria", "Rhizopus"]
+    assert m["label_mapping"]["unmapped_model_classes"] == ["Mucorales", "Talaromyces_marneffei",
+                                                            "Sporothrix_schenckii_complex", "Scedosporium_spp"]
+    assert m["image_level"]["n"] == len(mapped)
+    assert m["isolate_level"]["n"] == mapped["group"].nunique()
+    assert (tmp_path / "eval" / "confusion_isolate_level.png").stat().st_size > 0
+
+
+def test_training_run_writes_subgroup_and_genus_blocks(synthetic_manifest, tmp_path):
+    run_dir = run_training(_cfg(synthetic_manifest, tmp_path, split="holdout", classes=PLACEHOLDER_CMU_CLASSES,
+                                subgroups=("device",), fit_final=False))
+    metrics = json.loads((run_dir / "metrics.json").read_text())
+    assert metrics["isolate_level"]["role"] == "primary"
+    assert "genus_level" in metrics["isolate_level"]
+    devices = set(pd.read_csv(run_dir / "predictions.csv")["device"])
+    assert set(metrics["subgroups"]["device"]) == devices
+    with pytest.raises(ValueError, match="image_path"):
+        _cfg(synthetic_manifest, tmp_path, subgroups=("image_path",))
