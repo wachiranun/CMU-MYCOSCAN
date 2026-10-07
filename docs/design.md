@@ -68,8 +68,14 @@ Class imbalance is handled by the group-aware weighted sampler (`imbalance = "sa
 
 For each class (one versus rest) and as a macro average over classes present in the validation data: sensitivity, specificity, PPV, NPV, F1, accuracy and AUC-ROC. A class that is present but never predicted gets PPV 0. Leaving it undefined would drop it from the macro PPV and inflate the average. Overall accuracy is also reported. Everything is computed twice:
 
-- **Image level**: each image is scored on its own.
-- **Isolate level**: the mean of the class probabilities over all of an isolate's images. This is the clinically meaningful number, since a laboratory identifies an isolate, not a photograph.
+- **Isolate level** (primary): the mean of the class probabilities over all of an isolate's images. This is the clinically meaningful number, since a laboratory identifies an isolate, not a photograph.
+- **Image level** (secondary): each image is scored on its own. It is kept for comparison with published image-level numbers, and each block in `metrics.json` carries its `role`.
+
+Each level also gets Top-2 accuracy, since the pre-registered endpoints include a Top-2 threshold, and Cohen's kappa against the reference. Accuracy and Top-2 accuracy get Wilson 95% intervals. These treat a level's units as independent, which holds for isolates but not for the correlated images of one isolate. The isolate bootstrap covers every overall, macro and per-class metric, with 2,000 resamples by default. A class without support gets no interval, and the block says why instead of reporting an empty or degenerate range.
+
+Genus and order accuracy map both the reference and the top-1 prediction to the parent taxon, so calling *F. solani* complex for *F. oxysporum* complex is wrong at species level and right at genus level. The species-to-genus map is read from the whole manifest, not from the prediction table, because one validation fold need not contain every class the model can predict. Subgroup analyses (by device, phase and so on) rerun the same report on each subset, so a subgroup number means exactly what the headline number means.
+
+An external set labelled more coarsely than the model, such as OpenFungi Pool B (Flavi, Nigri, Fusarium, Rhizopus), is scored through a label map. The model's probabilities are summed into each reference label, not just its top-1 call, so AUC remains defined. Model classes outside the map share one `unmapped` column, so predicting one of them counts as an error and is never quietly dropped.
 
 Training runs a fixed number of epochs and does not pick the best epoch on validation. The validation fold is also the fold the reported score comes from, so picking an epoch on it would make that score optimistic, and with few validation isolates per class in interim runs the optimism would be large.
 

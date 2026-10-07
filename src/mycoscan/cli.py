@@ -37,12 +37,28 @@ def _train(args) -> None:
     print(run_training(load_config(args.config, args.set)))
 
 
+METRIC_OPTIONS = {"label_map", "genus_map", "order_map", "subgroups"}
+
+
+def _metric_options(path: str | None) -> dict:
+    if not path:
+        return {}
+    import tomllib
+
+    raw = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    unknown = sorted(set(raw) - METRIC_OPTIONS)
+    if unknown:
+        raise ValueError(f"{path}: unknown metric options {unknown}; expected some of {sorted(METRIC_OPTIONS)}")
+    return raw
+
+
 def _eval(args) -> None:
     from .pipeline import evaluate_checkpoint
 
-    m = evaluate_checkpoint(args.checkpoint, args.manifest, args.out, args.modality, args.source, args.bootstrap, args.device)
-    print(json.dumps({level: {"accuracy": m[level]["accuracy"], "macro": m[level]["macro"]}
-                      for level in ("image_level", "isolate_level")}, indent=2))
+    m = evaluate_checkpoint(args.checkpoint, args.manifest, args.out, args.modality, args.source, args.bootstrap,
+                            args.device, **_metric_options(args.metric_config))
+    print(json.dumps({level: {k: m[level][k] for k in ("role", "accuracy", "top2_accuracy", "kappa", "macro")}
+                      for level in ("isolate_level", "image_level")}, indent=2))
 
 
 def _explain(args) -> None:
@@ -76,11 +92,13 @@ def _compare(args) -> None:
     rows = []
     for run in args.runs:
         m = json.loads((Path(run) / "metrics.json").read_text(encoding="utf-8"))
-        for level in ("image_level", "isolate_level"):
+        for level in ("isolate_level", "image_level"):
             r = m[level]
             ci = r.get("ci95_isolate_bootstrap", {})
             rows.append({"run": Path(run).name, "level": level.split("_")[0], "n": r["n"],
                          "accuracy": _with_ci(r["accuracy"], ci, "accuracy"),
+                         "top2_accuracy": _with_ci(r.get("top2_accuracy", float("nan")), ci, "top2_accuracy"),
+                         "kappa": _with_ci(r.get("kappa", float("nan")), ci, "kappa"),
                          **{f"macro_{k}": _with_ci(r["macro"][k], ci, f"macro_{k}")
                             for k in ("sensitivity", "specificity", "ppv", "npv", "f1", "auc")}})
     print(pd.DataFrame(rows).to_string(index=False))
@@ -119,8 +137,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--out", required=True)
     p.add_argument("--modality", choices=["colony", "microscopic", "all"])
     p.add_argument("--source", default="all", choices=["cmu", "openfungi", "all"])
-    p.add_argument("--bootstrap", type=int, default=1000)
+    p.add_argument("--bootstrap", type=int, default=2000)
     p.add_argument("--device", default="auto")
+    p.add_argument("--metric-config", help="TOML with label_map, genus_map, order_map and subgroups")
     p.set_defaults(fn=_eval)
 
     p = sub.add_parser("explain", help="Grad-CAM and SmoothGrad panels plus an expert review sheet")
