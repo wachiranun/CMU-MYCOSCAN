@@ -21,7 +21,7 @@ from PIL import Image
 from torch import nn
 from torchvision import transforms as T
 
-from .models import ARCHS, load_checkpoint
+from .models import adapter, load_checkpoint
 from .transforms import build_transform, to_rgb
 
 
@@ -71,7 +71,7 @@ def explain_images(checkpoint: str | Path, images: list[str], out_dir: str | Pat
                    true_labels: list[str] | None = None) -> pd.DataFrame:
     model, meta = load_checkpoint(checkpoint, device)
     classes = meta["classes"]
-    layer = model.get_submodule(ARCHS[meta["arch"]].cam_layer)
+    layer = model.get_submodule(adapter(model).cam_layer)
     tf = build_transform(meta["image_size"], meta["autocontrast"], train=False)
     size = meta["image_size"]
     view = T.Compose([T.Resize(size), T.CenterCrop(size)])

@@ -1,6 +1,6 @@
 # CMU MycoScan: AI classification model
 
-Component 2 of CMU MycoScan. It trains and validates CNN classifiers (DenseNet-121 or ResNet-50, PyTorch) for fungal colony and microscopy images. It also produces Grad-CAM and saliency maps for expert review and exposes a `predict(image) -> {class: probability}` entry point for the web app.
+Component 2 of CMU MycoScan. It trains and validates image classifiers (any [timm](https://github.com/huggingface/pytorch-image-models) backbone, PyTorch) for fungal colony and microscopy images. It also produces Grad-CAM and saliency maps for expert review and exposes a `predict(image) -> {class: probability}` entry point for the web app.
 
 Design decisions and their reasons are in [docs/design.md](docs/design.md).
 
@@ -65,7 +65,22 @@ mycoscan train --config configs/cmu_microscopic.toml --set finetune=partial --se
 mycoscan train --config configs/cmu_microscopic.toml --set split=holdout   # the protocol's single 80/20 isolate split
 mycoscan train --config configs/cmu_microscopic.toml --set split=loio      # leave one isolate out
 mycoscan train --config configs/cmu_microscopic.toml --set arch=resnet50 --set weights=imagenet
+mycoscan train --config configs/cmu_microscopic.toml --set arch=convnext_tiny --set weights=imagenet22k --set amp=true --set grad_clip=1.0
 ```
+
+### Backbones and initialisation
+
+`arch` is any timm model name, and `weights` picks its initialisation:
+
+| `weights` | meaning |
+|---|---|
+| `imagenet` | ImageNet-1k weights: timm's default tag for the arch. `densenet121` and `resnet50` keep the torchvision weights they always used. |
+| `imagenet22k` | ImageNet-22k (or 21k) pretraining, preferring the tag not fine-tuned on 1k, for example `convnext_tiny.fb_in22k` |
+| `dino` | self-supervised DINO weights: a DINO tag (`convnext_small.dinov3_lvd1689m`) or a DINO arch (`vit_small_patch14_dinov2`) |
+| `none` | random initialisation |
+| a path | an earlier-stage checkpoint of the same arch; its head is replaced |
+
+To pin an exact timm tag, put it in `arch` (`arch = "convnext_tiny.fb_in22k_ft_in1k"`). A config whose arch has no weights of the requested kind fails at load time and lists the tags it does have. Verified to build and train: `convnext_tiny`, `convnext_small`, `tf_efficientnetv2_s`, `densenet121`, `resnet50`, `vit_small_patch14_dinov2`, `vit_small_patch16_dinov3`, `vit_base_patch16_224`, `convnext_small.dinov3_lvd1689m`. Transformers are built for `image_size`. `amp = true` turns on mixed precision (float16 on GPU, bfloat16 on CPU) and `grad_clip` caps the gradient norm (0, the default, turns it off).
 
 Each run writes `runs/<run_name>/` with these files:
 
@@ -122,6 +137,7 @@ The synthetic images are drawn shapes. Metrics on them prove only that the pipel
 ```bash
 pip install -e ".[test]"
 pytest
+pytest -m network     # also downloads pretrained weights and trains on them
 ```
 
 The suite runs on CPU in about one minute. It covers isolate leakage for all three split strategies, transforms (validation is never augmented), sampler weights, metrics against hand-computed values, freeze policy, staged-transfer loading, Grad-CAM and saliency maps, and a train, evaluate, explain and predict smoke run.

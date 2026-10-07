@@ -24,11 +24,13 @@ sklearn's `StratifiedKFold` refuses a fold count larger than every class's membe
 
 OpenFungi has 1,249 images, which is too few to pretrain a CNN from scratch. "Pre-trained weights from OpenFungi" is implemented as a chain:
 
-1. ImageNet weights from torchvision.
+1. ImageNet weights (or ImageNet-22k, or self-supervised DINO weights) from timm.
 2. Fine-tune on OpenFungi (5 genera, colony and microscopic images) with the last block unfrozen (`configs/openfungi_pretrain.toml`).
 3. Load that backbone, attach a new 10-class head, and fine-tune on CMU data (`weights = "runs/openfungi_densenet121/model.pt"`).
 
-`finetune = "head"` trains only the new fully connected head, as the protocol says. `finetune = "partial"` also trains the last dense block (DenseNet-121) or `layer4` (ResNet-50). `finetune = "full"` trains everything. Frozen BatchNorm layers stay in eval mode during training, so their running statistics keep the pretrained values.
+`finetune = "head"` trains only the new fully connected head, as the protocol says. `finetune = "partial"` also trains the last block and everything after it, such as final norms. `finetune = "full"` trains everything. Frozen BatchNorm layers stay in eval mode during training, so their running statistics keep the pretrained values. LayerNorm has no running statistics, so a frozen LayerNorm only needs its parameters frozen.
+
+Backbones come from timm, so any timm model name is a valid `arch`, and the code reads what it needs from the model itself instead of from a hand-kept registry. The head is the module timm names as the classifier. The blocks are the taps in timm's `feature_info`, and a block runs from just after the previous tap up to and including its own. For ResNet-50 the last block is `layer4`. For DenseNet-121 it is the last transition, `denseblock4` and `norm5`. For ConvNeXt it is the last stage, and for a ViT it is the last transformer block. The explain layer is the last tap. `densenet121` and `resnet50` were torchvision models before timm, and timm's versions have identical parameter names, so checkpoints from that time still load and predict identically.
 
 Head-only was the safer default when the study was expected to have only a few isolates per class. With 25 to 30 isolates per class, partial and full fine-tuning become realistic, and which depth wins is an empirical question that the pilot on OpenFungi and the k-fold estimate on CMU data settle.
 
@@ -59,6 +61,6 @@ Training runs a fixed number of epochs and does not pick the best epoch on valid
 
 ## Explainability
 
-`explain.py` computes Grad-CAM on the last convolutional block (`features.denseblock4` or `layer4`) and SmoothGrad saliency, which is the mean absolute input gradient over 25 noisy copies. Each image gets a three-panel PNG (original, Grad-CAM overlay, saliency) and a row in `review_sheet.csv` with blank columns for the expert's judgement. That sheet is the record for the protocol's concordance review (2.4). The reviewer checks whether the highlighted regions are conidiophores, hyphae, spores and colony texture, or artifacts such as plate edges, labels, scale bars and dust.
+`explain.py` computes Grad-CAM on the backbone's last feature tap (`features.norm5` for DenseNet-121, `layer4` for ResNet-50) and SmoothGrad saliency, which is the mean absolute input gradient over 25 noisy copies. Each image gets a three-panel PNG (original, Grad-CAM overlay, saliency) and a row in `review_sheet.csv` with blank columns for the expert's judgement. That sheet is the record for the protocol's concordance review (2.4). The reviewer checks whether the highlighted regions are conidiophores, hyphae, spores and colony texture, or artifacts such as plate edges, labels, scale bars and dust.
 
-DenseNet's classifier applies an in-place ReLU to the output of `norm5`, which breaks gradient hooks there. That is why Grad-CAM hooks `denseblock4` instead. Gradients flow from the input image, so Grad-CAM also works when the backbone is frozen.
+Gradients flow from the input image, so Grad-CAM also works when the backbone is frozen. A ViT's last tap outputs tokens, not a feature map, so Grad-CAM does not apply to it. Attention rollout for ViT backbones is a separate ticket.

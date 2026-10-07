@@ -44,8 +44,8 @@ def resolve_device(name: str) -> str:
 def fit_model(train_df: pd.DataFrame, cfg: Config, classes: list[str], device: str, seed: int) -> tuple[nn.Module, list[dict]]:
     seed_everything(seed)
     class_to_idx = {c: i for i, c in enumerate(classes)}
-    model = build_model(cfg.arch, len(classes), cfg.weights)
-    apply_finetune(model, cfg.arch, cfg.finetune)
+    model = build_model(cfg.arch, len(classes), cfg.weights, cfg.image_size)
+    apply_finetune(model, cfg.finetune)
     model.to(device)
     loader = make_loader(train_df, class_to_idx, cfg.image_size, cfg.autocontrast, train=True,
                          batch_size=cfg.batch_size, num_workers=cfg.num_workers, imbalance=cfg.imbalance, seed=seed)
@@ -56,17 +56,26 @@ def fit_model(train_df: pd.DataFrame, cfg: Config, classes: list[str], device: s
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(cfg.epochs, 1))
+    device_type = torch.device(device).type
+    # float16 needs loss scaling and exists only on GPU; CPU autocast uses bfloat16, which needs none.
+    amp_dtype = torch.float16 if device_type == "cuda" else torch.bfloat16
+    scaler = torch.amp.GradScaler(device_type, enabled=cfg.amp and amp_dtype == torch.float16)
     history = []
     for epoch in range(cfg.epochs):
         train_mode(model)
         total_loss, correct, seen = 0.0, 0, 0
         for x, y in loader:
             x, y = x.to(device), y.to(device)
-            logits = model(x)
-            loss = loss_fn(logits, y)
+            with torch.autocast(device_type, dtype=amp_dtype, enabled=cfg.amp):
+                logits = model(x)
+                loss = loss_fn(logits, y)
             opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
+            scaler.scale(loss).backward()
+            if cfg.grad_clip:
+                scaler.unscale_(opt)
+                nn.utils.clip_grad_norm_(params, cfg.grad_clip)
+            scaler.step(opt)
+            scaler.update()
             total_loss += loss.item() * len(y)
             correct += (logits.argmax(1) == y).sum().item()
             seen += len(y)

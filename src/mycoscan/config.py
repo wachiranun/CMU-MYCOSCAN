@@ -5,10 +5,11 @@ import tomllib
 from dataclasses import dataclass, fields
 from pathlib import Path
 
+from .models import PRETRAINED, resolve_weights
+
 CHOICES = {
     "modality": {"colony", "microscopic", "all"},
     "source": {"cmu", "openfungi", "all"},
-    "arch": {"densenet121", "resnet50"},
     "finetune": {"head", "partial", "full"},
     "imbalance": {"sampler", "loss", "none"},
     "split": {"holdout", "kfold", "loio"},
@@ -41,14 +42,19 @@ class Config:
     device: str = "auto"
     seed: int = 42
     bootstrap: int = 1000
+    amp: bool = False
+    grad_clip: float = 0.0
 
     def __post_init__(self) -> None:
         for name, allowed in CHOICES.items():
             value = getattr(self, name)
             if value not in allowed:
                 raise ValueError(f"config {name}={value!r}; expected one of {sorted(allowed)}")
-        if self.weights not in {"imagenet", "none"} and not Path(self.weights).is_file():
-            raise ValueError(f"config weights={self.weights!r} is neither imagenet, none, nor an existing checkpoint")
+        if self.weights not in {*PRETRAINED, "none"} and not Path(self.weights).is_file():
+            raise ValueError(f"config weights={self.weights!r} is none of {[*PRETRAINED, 'none']} nor an existing checkpoint")
+        resolve_weights(self.arch, self.weights)
+        if self.grad_clip < 0:
+            raise ValueError("config grad_clip must be >= 0 (0 turns clipping off)")
         if not 0 < self.val_fraction < 1:
             raise ValueError("config val_fraction must be in (0, 1)")
 

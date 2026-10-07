@@ -35,7 +35,7 @@ def test_head_only_training_leaves_backbone_and_bn_stats_untouched(synthetic_man
 
 def test_partial_unfreezes_only_head_and_last_block():
     model = build_model("resnet50", 4, "none")
-    apply_finetune(model, "resnet50", "partial")
+    apply_finetune(model, "partial")
     trainable = {n.split(".")[0] for n, p in model.named_parameters() if p.requires_grad}
     assert trainable == {"layer4", "fc"}
 
@@ -79,7 +79,7 @@ def test_end_to_end_train_eval_explain_predict(synthetic_manifest, tmp_path):
 def test_gradcam_and_saliency_are_unit_range_maps_even_with_frozen_backbone():
     torch.manual_seed(0)
     model = build_model("densenet121", 3, "none").eval()
-    apply_finetune(model, "densenet121", "head")
+    apply_finetune(model, "head")
     x = torch.randn(1, 3, 64, 64)
     cam = gradcam(model, model.features.denseblock4, x, target=1)
     sal = smoothgrad(model, x, target=1, n=3)

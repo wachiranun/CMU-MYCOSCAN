@@ -15,6 +15,7 @@ dependencies = [
     "scipy==1.17.1",
     "pillow==12.3.0",
     "matplotlib==3.11.2",
+    "timm==1.0.30",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +24,9 @@ dev = [
     "pytest==9.1.1",
     "ipython>=8.0.0",
     "ipykernel>=6.0.0",
+]
+mlflow = [
+    "mlflow-skinny==3.16.1",
 ]
 
 [project.scripts]
@@ -33,3 +37,5 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["network: downloads pretrained weights; run with -m network"]
+addopts = "-m 'not network'"
