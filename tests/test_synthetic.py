@@ -1,13 +1,18 @@
 import hashlib
 
 import numpy as np
+import pandas as pd
 from PIL import Image
 
 from mycoscan.manifest import load_manifest
 from mycoscan.splits import make_folds
 
 
+NEW_COLUMNS = ("genus", "temperature", "phase", "fov_id", "z_index", "sha256", "group_id", "split", "fold")
+
+
 def test_synthetic_manifest_loads_with_new_metadata(synthetic_manifest):
+    assert set(NEW_COLUMNS) <= set(pd.read_csv(synthetic_manifest, nrows=0).columns)
     df = load_manifest(synthetic_manifest)
     cmu = df[df["source"] == "cmu"]
     assert (cmu["genus"] != "").all()
@@ -15,7 +20,8 @@ def test_synthetic_manifest_loads_with_new_metadata(synthetic_manifest):
     assert (micro["fov_id"] != "").all()
     assert micro["z_index"].notna().all()
     first = df.iloc[0]
-    assert first["sha256"] == hashlib.sha256(open(first["image_path"], "rb").read()).hexdigest()
+    with open(first["image_path"], "rb") as fh:
+        assert first["sha256"] == hashlib.sha256(fh.read()).hexdigest()
 
 
 def test_openfungi_images_come_in_near_duplicate_groups(synthetic_manifest):
@@ -42,5 +48,9 @@ def test_dimorphic_classes_have_both_phases_and_others_none(synthetic_manifest):
 def test_planted_duplicates_never_straddle_a_grouped_fold(synthetic_manifest):
     of = load_manifest(synthetic_manifest)
     of = of[of["source"] == "openfungi"].reset_index(drop=True)
+    # The planted pair identity comes from the file name (<plate>_shot0 / _shot1), not from `group`,
+    # so a wrongly derived `group` (one per image) would be caught here.
+    plate = of["image_path"].str.extract(r"(OF_[A-Za-z]+_\d+)_shot\d\.png$")[0]
+    assert plate.notna().all() and plate.value_counts().eq(2).all()
     for fold in make_folds(of, "kfold", n_folds=3, seed=0):
-        assert set(of["group"].iloc[fold.train_idx]) & set(of["group"].iloc[fold.val_idx]) == set()
+        assert set(plate.iloc[fold.train_idx]) & set(plate.iloc[fold.val_idx]) == set()

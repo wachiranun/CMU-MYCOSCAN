@@ -22,7 +22,7 @@ from .data import class_loss_weights, make_loader
 from .manifest import load_manifest, select
 from .metrics import evaluate_predictions, prob_columns
 from .models import apply_finetune, build_model, load_checkpoint, save_checkpoint, train_mode
-from .splits import assert_no_isolate_leakage, describe_fold, make_folds
+from .splits import assert_no_group_leakage, describe_fold, make_folds
 
 log = logging.getLogger("mycoscan")
 
@@ -146,7 +146,7 @@ def run_training(cfg: Config) -> Path:
     fold_info, tables, histories = [], [], {}
     started = time.time()
     for k, fold in enumerate(folds):
-        assert_no_isolate_leakage(df, fold)
+        assert_no_group_leakage(df, fold)
         info = describe_fold(df, fold, classes)
         fold_info.append(info)
         log.info("%s: %d/%d train/val images, %d/%d groups, val classes without groups: %s", fold.name,

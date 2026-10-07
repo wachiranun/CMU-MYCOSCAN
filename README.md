@@ -41,7 +41,7 @@ Every dataset is a CSV manifest with one row per image. Image paths are relative
 | `phase` | no | `mold`, `yeast`, `na` (default); for dimorphic isolates |
 | `fov_id`, `z_index` | no | field of view and Z-plane of a microscopic image |
 | `sha256` | no | hash of the image file |
-| `split`, `fold` | no | written by the splits file, not by hand |
+| `split`, `fold` | no | reserved for the frozen splits file of a later ticket; leave blank |
 
 Loading adds a `group` column: `isolate_id` for CMU rows and `group_id` for OpenFungi rows. It is the unit of splitting, sampling and bootstrapping. Loading fails with a clear error for a missing column, an unknown value, a missing image file, a CMU row without an isolate, an OpenFungi row without a group, or an isolate labelled with two species.
 

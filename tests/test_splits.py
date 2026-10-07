@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mycoscan.splits import Fold, assert_no_isolate_leakage, make_folds
+from mycoscan.splits import Fold, assert_no_group_leakage, make_folds
 
 
 def _manifest_rows():
@@ -73,7 +73,7 @@ def test_folds_keep_a_group_together_even_when_isolate_ids_differ():
         train_groups = set(df["group"].iloc[fold.train_idx])
         val_groups = set(df["group"].iloc[fold.val_idx])
         assert train_groups & val_groups == set()
-        assert_no_isolate_leakage(df, fold)
+        assert_no_group_leakage(df, fold)
 
 
 def test_leakage_detector_rejects_shared_isolate():
@@ -82,4 +82,4 @@ def test_leakage_detector_rejects_shared_isolate():
     rest = np.flatnonzero(df["group"] != "S0-I0")
     leaky = Fold("leaky", np.concatenate([rest, same_isolate[:1]]), same_isolate[1:])
     with pytest.raises(AssertionError, match="S0-I0"):
-        assert_no_isolate_leakage(df, leaky)
+        assert_no_group_leakage(df, leaky)

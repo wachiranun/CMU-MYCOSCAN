@@ -6,11 +6,11 @@ This document explains the choices behind `src/mycoscan`. Each choice says what 
 
 The CMU study collects 25 to 30 sequence-confirmed isolates per class, 250 to 300 in all. Each isolate has many images: colony obverse and reverse at several growth days, and 10 to 30 microscope fields or Z-planes per slide from two devices. Two images of the same isolate are close to duplicates. If one sits in training and the other in validation, the model can score well by recognising the isolate instead of the species. OpenFungi has the same problem in a different form: it has no isolate identifiers, but many of its photos are repeated shots of one plate.
 
-So the manifest loader derives one `group` column, which is the isolate for CMU rows and a pseudo-group of repeated shots for OpenFungi rows, and everything downstream uses it. `splits.py` assigns whole groups to folds, never single images, and `assert_no_isolate_leakage` runs before every fold trains. The same rule drives two other places:
+So the manifest loader derives one `group` column, which is the isolate for CMU rows and a pseudo-group of repeated shots for OpenFungi rows, and everything downstream uses it. `splits.py` assigns whole groups to folds, never single images, and `assert_no_group_leakage` runs before every fold trains. The same rule drives two other places:
 
 - The weighted sampler in `data.py` gives every class the same total weight, and every group within a class the same share. An isolate photographed 30 times does not outweigh one photographed 5 times.
 - The bootstrap confidence intervals in `metrics.py` resample groups, not images. Resampling images would treat 30 near-copies as 30 independent cases and make the intervals far too narrow. Groups are resampled within each species, so every replicate contains every class and the macro averages always cover the same classes.
-- A CMU row without an `isolate_id`, or an OpenFungi row without a `group_id`, fails at load time. A blank value would otherwise make the image its own group and let it land on the other side of a split from its sibling images. The only exception is the deliberately leaky image-level split used to reproduce the OpenFungi paper's number, which has to ask for ungrouped rows explicitly.
+- A CMU row without an `isolate_id`, or an OpenFungi row without a `group_id`, fails at load time. A blank value would otherwise make the image its own group and let it land on the other side of a split from its sibling images. The loader has an explicit opt-out that loads ungrouped OpenFungi rows as one group per image; it is reserved for the deliberately leaky image-level split that a later ticket adds to reproduce the OpenFungi paper's number, and nothing in the training pipeline uses it.
 
 ## Why k-fold is the headline estimate and 80/20 is kept for the protocol
 
@@ -36,7 +36,7 @@ Head-only was the safer default when the study was expected to have only a few i
 
 Colony photographs and microscope fields share almost nothing visually. The scale, background, colour cues and diagnostic structures all differ. A single model would also be dominated by the microscopic set, which has about 10 times more images. So each config trains one modality (`modality = "colony"` or `"microscopic"`). The checkpoint records its modality so the web app can route an image to the right model. `modality = "all"` still exists for experiments.
 
-Because predictions are stored per image with their `group`, combining the two models for one isolate is a mean over both prediction tables (`metrics.aggregate_by_isolate`). This matches how a mycologist combines the colony and the slide.
+Because predictions are stored per image with their `group`, combining the two models for one isolate is a mean over both prediction tables (`metrics.aggregate_by_group`). This matches how a mycologist combines the colony and the slide.
 
 ## Preprocessing and augmentation
 
@@ -46,7 +46,7 @@ Both training and validation images then get autocontrast, a resize, and ImageNe
 
 Only training images are augmented, with random crops, flips, right-angle rotations, brightness, contrast and saturation jitter, and occasional blur that mimics an out-of-focus Z-plane. Validation and test images are real images, centre-cropped. Hue is never jittered, because pigment colour is diagnostic. The red diffusible pigment of *Talaromyces marneffei* on the colony reverse is one example.
 
-Class imbalance is handled by the isolate-aware weighted sampler (`imbalance = "sampler"`, the default) or by a class-weighted loss (`imbalance = "loss"`). The code never applies both, because that would correct the imbalance twice.
+Class imbalance is handled by the group-aware weighted sampler (`imbalance = "sampler"`, the default) or by a class-weighted loss (`imbalance = "loss"`). The code never applies both, because that would correct the imbalance twice.
 
 ## Metrics
 
@@ -55,7 +55,7 @@ For each class (one versus rest) and as a macro average over classes present in 
 - **Image level**: each image is scored on its own.
 - **Isolate level**: the mean of the class probabilities over all of an isolate's images. This is the clinically meaningful number, since a laboratory identifies an isolate, not a photograph.
 
-Training runs a fixed number of epochs and does not pick the best epoch on validation. With 5 validation isolates, picking an epoch on them would make the reported score optimistic.
+Training runs a fixed number of epochs and does not pick the best epoch on validation. The validation fold is also the fold the reported score comes from, so picking an epoch on it would make that score optimistic, and with few validation isolates per class in interim runs the optimism would be large.
 
 ## Explainability
 

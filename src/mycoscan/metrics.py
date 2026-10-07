@@ -81,7 +81,7 @@ def prob_columns(classes: list[str]) -> list[str]:
     return [f"prob_{c}" for c in classes]
 
 
-def aggregate_by_isolate(preds: pd.DataFrame, classes: list[str]) -> pd.DataFrame:
+def aggregate_by_group(preds: pd.DataFrame, classes: list[str]) -> pd.DataFrame:
     """Mean-probability vote over all images of a group (the isolate for CMU data)."""
     cols = prob_columns(classes)
     return preds.groupby("group").agg({"species": "first", **{c: "mean" for c in cols}}).reset_index()
@@ -117,9 +117,9 @@ def evaluate_predictions(preds: pd.DataFrame, classes: list[str], n_boot: int = 
     """preds: one row per image with species, group and prob_<class> columns."""
     class_idx = {c: i for i, c in enumerate(classes)}
     cols = prob_columns(classes)
-    iso = aggregate_by_isolate(preds, classes)
+    grouped = aggregate_by_group(preds, classes)
     result = {}
-    for level, table in (("image_level", preds), ("isolate_level", iso)):
+    for level, table in (("image_level", preds), ("isolate_level", grouped)):
         report = classification_report(table["species"].map(class_idx).to_numpy(), table[cols].to_numpy(), classes)
         if n_boot:
             report["ci95_isolate_bootstrap"] = _bootstrap(table, classes, n_boot, seed)

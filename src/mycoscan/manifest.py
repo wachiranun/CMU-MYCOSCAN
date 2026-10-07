@@ -12,12 +12,12 @@ Columns:
     day         growth day, integer or blank     (optional)
     source      cmu | openfungi                   (optional, default cmu)
     genus       taxonomic rollup of species       (optional)
-    temperature incubation temperature            (optional)
+    temperature incubation temperature, integer or blank   (optional)
     phase       mold | yeast | na                 (optional, default na; dimorphic isolates)
     fov_id      field-of-view identifier          (optional)
     z_index     Z-plane, integer or blank         (optional)
     sha256      hash of the image file            (optional)
-    split, fold assigned by the splits file       (optional)
+    split, fold reserved for the frozen splits file of a later ticket; blank until then
 
 Loading adds one derived column, `group`: the unit of splitting, sampling and
 bootstrapping. It is `isolate_id` for CMU rows and `group_id` for OpenFungi rows.
@@ -40,12 +40,12 @@ ALLOWED = {
     "source": {"cmu", "openfungi"},
     "phase": {"mold", "yeast", "na"},
 }
-INTEGER = ("day", "z_index")
+INTEGER = ("day", "z_index", "temperature")
 
 
 def load_manifest(path: str | Path, allow_ungrouped: bool = False) -> pd.DataFrame:
     """allow_ungrouped: let OpenFungi rows without a group_id load as one group per image.
-    Only for the leaky image-level comparison split; grouped splits must refuse them."""
+    Reserved for the leaky image-level comparison split (a later ticket); grouped splits must refuse them."""
     path = Path(path)
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
     missing = [c for c in REQUIRED if c not in df.columns]
@@ -67,27 +67,28 @@ def load_manifest(path: str | Path, allow_ungrouped: bool = False) -> pd.DataFra
     if absent:
         raise FileNotFoundError(f"{path}: {len(absent)} images not found, e.g. {absent[:3]}")
 
-    df["isolate_id"] = df["isolate_id"].str.strip()
-    no_isolate = df["isolate_id"] == ""
-    blank_cmu = df.loc[no_isolate & (df["source"] == "cmu"), "image_path"].tolist()
-    if blank_cmu:
-        raise ValueError(f"{path}: {len(blank_cmu)} CMU images have no isolate_id, e.g. {blank_cmu[:3]}")
-    df.loc[no_isolate, "isolate_id"] = "img:" + df.loc[no_isolate, "image_path"]
-    df["group_id"] = df["group_id"].str.strip()
-    ungrouped = (df["source"] == "openfungi") & (df["group_id"] == "")
-    if ungrouped.any() and not allow_ungrouped:
-        examples = df.loc[ungrouped, "image_path"].tolist()
-        raise ValueError(f"{path}: {len(examples)} OpenFungi images have no group_id, e.g. {examples[:3]}; "
-                         "build pseudo-groups first, or pass allow_ungrouped=True for a leaky image-level split")
-    df.loc[ungrouped, "group_id"] = "img:" + df.loc[ungrouped, "image_path"]
+    _require_id(df, path, "isolate_id", source="cmu", required=True)
+    _require_id(df, path, "group_id", source="openfungi", required=not allow_ungrouped,
+                hint="build pseudo-groups first, or pass allow_ungrouped=True for a leaky image-level split")
     df["group"] = df["isolate_id"].where(df["source"] == "cmu", df["group_id"])
-    species_per_isolate = df.groupby("isolate_id")["species"].nunique()
-    conflicting = species_per_isolate[species_per_isolate > 1].index.tolist()
+    species_per_group = df.groupby("group")["species"].nunique()
+    conflicting = species_per_group[species_per_group > 1].index.tolist()
     if conflicting:
-        raise ValueError(f"{path}: isolates labelled with more than one species: {conflicting[:5]}")
+        raise ValueError(f"{path}: groups labelled with more than one species: {conflicting[:5]}")
     for col in INTEGER:
         df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
     return df.reset_index(drop=True)
+
+
+def _require_id(df: pd.DataFrame, path: Path, col: str, source: str, required: bool, hint: str = "") -> None:
+    """Rows of `source` must carry `col`; blanks elsewhere (or when not required) become one id per image."""
+    df[col] = df[col].str.strip()
+    blank = df[col] == ""
+    offending = df.loc[blank & (df["source"] == source), "image_path"].tolist()
+    if offending and required:
+        raise ValueError(f"{path}: {len(offending)} {source} images have no {col}, e.g. {offending[:3]}"
+                         + (f"; {hint}" if hint else ""))
+    df.loc[blank, col] = "img:" + df.loc[blank, "image_path"]
 
 
 def select(df: pd.DataFrame, modality: str, source: str) -> pd.DataFrame:

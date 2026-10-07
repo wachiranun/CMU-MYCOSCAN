@@ -43,6 +43,15 @@ def test_openfungi_row_without_group_id_is_rejected(tmp_path):
         load_manifest(path)
 
 
+def test_openfungi_group_labelled_with_two_species_is_rejected(tmp_path):
+    path = _write(tmp_path, [
+        {"image_path": "a.png", "species": "Flavi", "isolate_id": "", "modality": "colony", "source": "openfungi", "group_id": "G7"},
+        {"image_path": "b.png", "species": "Nigri", "isolate_id": "", "modality": "colony", "source": "openfungi", "group_id": "G7"},
+    ])
+    with pytest.raises(ValueError, match="G7"):
+        load_manifest(path)
+
+
 def test_ungrouped_openfungi_rows_become_one_group_per_image_only_when_allowed(tmp_path):
     path = _write(tmp_path, [
         {"image_path": "a.png", "species": "Flavi", "isolate_id": "", "modality": "colony", "source": "openfungi"},
@@ -58,8 +67,8 @@ def test_new_metadata_columns_default_when_absent(tmp_path):
     ])
     row = load_manifest(path).iloc[0]
     assert row["phase"] == "na"
-    assert (row["genus"], row["temperature"], row["fov_id"], row["sha256"], row["split"], row["fold"]) == ("", "", "", "", "", "")
-    assert pd.isna(row["z_index"])
+    assert (row["genus"], row["fov_id"], row["sha256"], row["split"], row["fold"]) == ("", "", "", "", "")
+    assert pd.isna(row["z_index"]) and pd.isna(row["temperature"])
 
 
 def test_phase_must_be_mold_yeast_or_na(tmp_path):

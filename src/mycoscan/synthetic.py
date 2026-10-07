@@ -148,7 +148,8 @@ def make_synthetic(out_dir: str | Path, size: int = 128, fovs_per_device: int = 
     def save(img: Image.Image, name: str, **row) -> None:
         path = out / "images" / name
         img.save(path)
-        rows.append({"image_path": f"images/{name}", "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), **row})
+        rows.append({"image_path": f"images/{name}", "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                     "split": "", "fold": "", **row})
 
     for c, species in enumerate(PLACEHOLDER_CMU_CLASSES):
         base = _morphology(rng)

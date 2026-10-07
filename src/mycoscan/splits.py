@@ -63,7 +63,7 @@ def make_folds(df: pd.DataFrame, strategy: str, n_folds: int = 5, val_fraction: 
     raise ValueError(f"unknown split strategy {strategy!r}")
 
 
-def assert_no_isolate_leakage(df: pd.DataFrame, fold: Fold) -> None:
+def assert_no_group_leakage(df: pd.DataFrame, fold: Fold) -> None:
     train = set(df["group"].iloc[fold.train_idx])
     val = set(df["group"].iloc[fold.val_idx])
     shared = train & val
