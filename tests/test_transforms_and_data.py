@@ -83,12 +83,12 @@ def test_manifest_rejects_isolate_with_two_species(tmp_path):
         load_manifest(tmp_path / "m.csv")
 
 
-def test_manifest_requires_isolate_for_cmu_but_not_openfungi(tmp_path):
+def test_manifest_requires_isolate_for_cmu_and_group_id_for_openfungi(tmp_path):
     (tmp_path / "x.png").write_bytes(b"")
     rows = {"image_path": ["x.png", "x.png"], "species": ["A", "A"], "isolate_id": [" I1 ", ""],
-            "modality": ["colony", "colony"], "source": ["cmu", "openfungi"]}
+            "group_id": ["", " G1 "], "modality": ["colony", "colony"], "source": ["cmu", "openfungi"]}
     pd.DataFrame(rows).to_csv(tmp_path / "ok.csv", index=False)
-    assert load_manifest(tmp_path / "ok.csv")["isolate_id"].tolist() == ["I1", "img:" + str((tmp_path / "x.png").resolve())]
+    assert load_manifest(tmp_path / "ok.csv")["group"].tolist() == ["I1", "G1"]
     rows["source"] = ["cmu", "cmu"]
     pd.DataFrame(rows).to_csv(tmp_path / "bad.csv", index=False)
     with pytest.raises(ValueError, match="no isolate_id"):

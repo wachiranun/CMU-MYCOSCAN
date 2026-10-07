@@ -17,12 +17,11 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from PIL import Image
 from torch import nn
 from torchvision import transforms as T
 
-from .models import ARCHS, load_checkpoint
-from .transforms import build_transform, to_rgb
+from .models import adapter, load_checkpoint
+from .transforms import build_transform, load_image
 
 
 def gradcam(model: nn.Module, layer: nn.Module, x: torch.Tensor, target: int) -> np.ndarray:
@@ -68,10 +67,11 @@ def overlay(rgb: np.ndarray, heat: np.ndarray, alpha: float = 0.45) -> np.ndarra
 
 
 def explain_images(checkpoint: str | Path, images: list[str], out_dir: str | Path, device: str = "cpu",
-                   true_labels: list[str] | None = None) -> pd.DataFrame:
+                   true_labels: list[str] | None = None, modalities: list[str] | None = None) -> pd.DataFrame:
+    """modalities: one per image, for the plate crop; defaults to the checkpoint's modality."""
     model, meta = load_checkpoint(checkpoint, device)
     classes = meta["classes"]
-    layer = model.get_submodule(ARCHS[meta["arch"]].cam_layer)
+    layer = model.get_submodule(adapter(model).cam_layer)
     tf = build_transform(meta["image_size"], meta["autocontrast"], train=False)
     size = meta["image_size"]
     view = T.Compose([T.Resize(size), T.CenterCrop(size)])
@@ -79,10 +79,9 @@ def explain_images(checkpoint: str | Path, images: list[str], out_dir: str | Pat
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     for i, path in enumerate(images):
-        with Image.open(path) as img:
-            img = to_rgb(img)
-            x = tf(img).unsqueeze(0).to(device)
-            rgb = np.asarray(view(img), dtype=float)
+        img = load_image(path, meta.get("plate_crop", False), modalities[i] if modalities else meta.get("modality", ""))
+        x = tf(img).unsqueeze(0).to(device)
+        rgb = np.asarray(view(img), dtype=float)
         with torch.no_grad():
             probs = model(x).softmax(dim=1)[0].cpu().numpy()
         target = int(probs.argmax())

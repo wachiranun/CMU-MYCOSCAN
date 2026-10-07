@@ -4,35 +4,36 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import torch
-from PIL import Image
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
-from .transforms import build_transform, to_rgb
+from .transforms import build_transform, load_image
 
 
 class ImageDataset(Dataset):
-    def __init__(self, paths: list[str], labels: list[int], transform):
+    def __init__(self, paths: list[str], labels: list[int], transform, modalities: list[str], plate_crop: bool = False):
         self.paths = paths
         self.labels = labels
         self.transform = transform
+        self.modalities = modalities
+        self.plate_crop = plate_crop
 
     def __len__(self) -> int:
         return len(self.paths)
 
     def __getitem__(self, i: int):
-        with Image.open(self.paths[i]) as img:
-            return self.transform(to_rgb(img)), self.labels[i]
+        return self.transform(load_image(self.paths[i], self.plate_crop, self.modalities[i])), self.labels[i]
 
 
-def balanced_sample_weights(species: pd.Series, isolate_id: pd.Series) -> np.ndarray:
-    """Per-image weights so every class, and every isolate within a class, is drawn equally often.
+def balanced_sample_weights(species: pd.Series, group: pd.Series) -> np.ndarray:
+    """Per-image weights so every class, and every group within a class, is drawn equally often.
 
-    An isolate photographed 30 times must not outweigh one photographed 5 times,
-    and a class with 3 isolates must not outweigh a class with 2.
+    A group is an isolate (CMU) or a plate's pseudo-group (OpenFungi). One photographed
+    30 times must not outweigh one photographed 5 times, and a class with 3 groups
+    must not outweigh a class with 2.
     """
-    isolates_per_class = species.map(isolate_id.groupby(species).nunique())
-    images_per_isolate = isolate_id.map(isolate_id.value_counts())
-    return np.array(1.0 / (isolates_per_class * images_per_isolate), dtype=float)
+    groups_per_class = species.map(group.groupby(species).nunique())
+    images_per_group = group.map(group.value_counts())
+    return np.array(1.0 / (groups_per_class * images_per_group), dtype=float)
 
 
 def class_loss_weights(labels: np.ndarray, n_classes: int) -> torch.Tensor:
@@ -41,13 +42,27 @@ def class_loss_weights(labels: np.ndarray, n_classes: int) -> torch.Tensor:
     return torch.tensor(weights, dtype=torch.float32)
 
 
+def refuse_held_out(df: pd.DataFrame) -> None:
+    """A training loader never sees an external-test image: Pool B, or a sealed test split."""
+    held_out = df["split"].eq("test") if "split" in df else pd.Series(False, index=df.index)
+    if "pool" in df:
+        held_out |= df["pool"].eq("B")
+    if held_out.any():
+        paths = df.loc[held_out, "image_path"].tolist()
+        raise ValueError(f"training loader refused {len(paths)} held-out rows (Pool B or test): {', '.join(paths[:10])}")
+
+
 def make_loader(df: pd.DataFrame, class_to_idx: dict[str, int], image_size: int, autocontrast: bool,
-                train: bool, batch_size: int, num_workers: int, imbalance: str = "none", seed: int = 0) -> DataLoader:
+                train: bool, batch_size: int, num_workers: int, imbalance: str = "none", seed: int = 0,
+                augmentation: str = "standard", plate_crop: bool = False) -> DataLoader:
+    if train:
+        refuse_held_out(df)
     labels = [class_to_idx[s] for s in df["species"]]
-    ds = ImageDataset(df["image_path"].tolist(), labels, build_transform(image_size, autocontrast, train))
+    ds = ImageDataset(df["image_path"].tolist(), labels, build_transform(image_size, autocontrast, train, augmentation),
+                      df["modality"].tolist(), plate_crop)
     generator = torch.Generator().manual_seed(seed)
     if train and imbalance == "sampler":
-        weights = balanced_sample_weights(df["species"], df["isolate_id"])
+        weights = balanced_sample_weights(df["species"], df["group"])
         sampler = WeightedRandomSampler(weights, num_samples=len(ds), replacement=True, generator=generator)
         return DataLoader(ds, batch_size=batch_size, sampler=sampler, num_workers=num_workers, drop_last=len(ds) > batch_size)
     return DataLoader(ds, batch_size=batch_size, shuffle=train, generator=generator, num_workers=num_workers,

@@ -18,11 +18,13 @@ import torch
 from torch import nn
 
 from .config import Config
-from .data import class_loss_weights, make_loader
+from .data import make_loader
+from .losses import build_loss
 from .manifest import load_manifest, select
 from .metrics import evaluate_predictions, prob_columns
 from .models import apply_finetune, build_model, load_checkpoint, save_checkpoint, train_mode
-from .splits import assert_no_isolate_leakage, describe_fold, make_folds
+from .provenance import collect, log_to_mlflow, require_mlflow
+from .splits import apply_splits, assert_no_group_leakage, describe_fold, frozen_folds, load_splits_file, make_folds
 
 log = logging.getLogger("mycoscan")
 
@@ -44,29 +46,37 @@ def resolve_device(name: str) -> str:
 def fit_model(train_df: pd.DataFrame, cfg: Config, classes: list[str], device: str, seed: int) -> tuple[nn.Module, list[dict]]:
     seed_everything(seed)
     class_to_idx = {c: i for i, c in enumerate(classes)}
-    model = build_model(cfg.arch, len(classes), cfg.weights)
-    apply_finetune(model, cfg.arch, cfg.finetune)
+    model = build_model(cfg.arch, len(classes), cfg.weights, cfg.image_size)
+    apply_finetune(model, cfg.finetune)
     model.to(device)
     loader = make_loader(train_df, class_to_idx, cfg.image_size, cfg.autocontrast, train=True,
-                         batch_size=cfg.batch_size, num_workers=cfg.num_workers, imbalance=cfg.imbalance, seed=seed)
-    weights = None
-    if cfg.imbalance == "loss":
-        weights = class_loss_weights(train_df["species"].map(class_to_idx).to_numpy(), len(classes)).to(device)
-    loss_fn = nn.CrossEntropyLoss(weight=weights)
+                         batch_size=cfg.batch_size, num_workers=cfg.num_workers, imbalance=cfg.imbalance, seed=seed,
+                         augmentation=cfg.augmentation, plate_crop=cfg.plate_crop)
+    labels = torch.tensor(train_df["species"].map(class_to_idx).to_numpy())
+    loss_fn = build_loss(cfg.loss, labels, len(classes), cfg.label_smoothing, cfg.focal_gamma).to(device)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(cfg.epochs, 1))
+    device_type = torch.device(device).type
+    # float16 needs loss scaling and exists only on GPU; CPU autocast uses bfloat16, which needs none.
+    amp_dtype = torch.float16 if device_type == "cuda" else torch.bfloat16
+    scaler = torch.amp.GradScaler(device_type, enabled=cfg.amp and amp_dtype == torch.float16)
     history = []
     for epoch in range(cfg.epochs):
         train_mode(model)
         total_loss, correct, seen = 0.0, 0, 0
         for x, y in loader:
             x, y = x.to(device), y.to(device)
-            logits = model(x)
-            loss = loss_fn(logits, y)
+            with torch.autocast(device_type, dtype=amp_dtype, enabled=cfg.amp):
+                logits = model(x)
+                loss = loss_fn(logits, y)
             opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
+            scaler.scale(loss).backward()
+            if cfg.grad_clip:
+                scaler.unscale_(opt)
+                nn.utils.clip_grad_norm_(params, cfg.grad_clip)
+            scaler.step(opt)
+            scaler.update()
             total_loss += loss.item() * len(y)
             correct += (logits.argmax(1) == y).sum().item()
             seen += len(y)
@@ -78,15 +88,17 @@ def fit_model(train_df: pd.DataFrame, cfg: Config, classes: list[str], device: s
 
 @torch.no_grad()
 def predict_probs(model: nn.Module, df: pd.DataFrame, classes: list[str], image_size: int, autocontrast: bool,
-                  device: str, batch_size: int = 32) -> np.ndarray:
+                  device: str, batch_size: int = 32, plate_crop: bool = False) -> np.ndarray:
     class_to_idx = {c: i for i, c in enumerate(classes)}
-    loader = make_loader(df, class_to_idx, image_size, autocontrast, train=False, batch_size=batch_size, num_workers=0)
+    loader = make_loader(df, class_to_idx, image_size, autocontrast, train=False, batch_size=batch_size, num_workers=0,
+                         plate_crop=plate_crop)
     model.eval()
     return np.concatenate([model(x.to(device)).softmax(dim=1).cpu().numpy() for x, _ in loader])
 
 
 def prediction_table(df: pd.DataFrame, probs: np.ndarray, classes: list[str], fold: str) -> pd.DataFrame:
-    keep = ["image_path", "species", "isolate_id", "modality", "view", "device", "day", "source"]
+    keep = ["image_path", "species", "isolate_id", "group_id", "group", "modality", "view", "device", "day",
+            "source", "genus", "temperature", "phase", "fov_id", "z_index"]
     table = df[keep].reset_index(drop=True).copy()
     table["fold"] = fold
     table["predicted"] = [classes[i] for i in probs.argmax(axis=1)]
@@ -114,8 +126,10 @@ def write_report(run_dir: Path, preds: pd.DataFrame, classes: list[str], n_boot:
     preds.to_csv(run_dir / "predictions.csv", index=False)
     metrics = {**extra, **evaluate_predictions(preds, classes, n_boot, seed)}
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    flag = " (LEAKY, comparison only)" if extra.get("leaky") else ""
     for level in ("image_level", "isolate_level"):
-        plot_confusion(metrics[level]["confusion_matrix"], classes, run_dir / f"confusion_{level}.png", level.replace("_", " "))
+        plot_confusion(metrics[level]["confusion_matrix"], classes, run_dir / f"confusion_{level}.png",
+                       level.replace("_", " ") + flag)
     return metrics
 
 
@@ -128,44 +142,69 @@ def _resolve_classes(df: pd.DataFrame, cfg_classes: tuple[str, ...]) -> list[str
 
 
 def run_training(cfg: Config) -> Path:
+    if cfg.tracking == "mlflow":
+        require_mlflow()
+    provenance = collect(cfg.manifest, asdict(cfg), cfg.splits_file or None)
     seed_everything(cfg.seed)
     device = resolve_device(cfg.device)
-    df = select(load_manifest(cfg.manifest), cfg.modality, cfg.source)
+    leaky = cfg.split == "image_random"
+    df = select(load_manifest(cfg.manifest, allow_ungrouped=leaky), cfg.modality, cfg.source)
+    if cfg.splits_file:
+        df = apply_splits(df, load_splits_file(cfg.splits_file, cfg.manifest))
+        held_out = df["pool"] == "B"
+        log.info("splits file %s: %d Pool B images held out of this run", cfg.splits_file, int(held_out.sum()))
+        df = df[~held_out].reset_index(drop=True)
     if df.empty:
         raise ValueError(f"no images for modality={cfg.modality} source={cfg.source} in {cfg.manifest}")
     classes = _resolve_classes(df, cfg.classes)
     run_dir = Path(cfg.output_dir) / cfg.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2), encoding="utf-8")
-    log.info("run %s: %d images, %d isolates, %d classes, device=%s", cfg.run_name, len(df),
-             df["isolate_id"].nunique(), len(classes), device)
-    meta = {"modality": cfg.modality, "source": cfg.source, "finetune": cfg.finetune, "weights_init": cfg.weights}
+    (run_dir / "config.json").write_text(json.dumps({**asdict(cfg), "leaky": leaky}, indent=2), encoding="utf-8")
+    log.info("run %s: %d images, %d groups, %d classes, device=%s", cfg.run_name, len(df),
+             df["group"].nunique(), len(classes), device)
+    if leaky:
+        log.warning("split=image_random is leaky, comparison only: images of one group land on both sides of a split")
+    meta = {"modality": cfg.modality, "source": cfg.source, "finetune": cfg.finetune, "weights_init": cfg.weights,
+            "plate_crop": cfg.plate_crop, "leaky": leaky}
 
-    folds = make_folds(df, cfg.split, cfg.n_folds, cfg.val_fraction, cfg.seed)
+    if cfg.splits_file and cfg.split == "kfold":
+        folds = frozen_folds(df)
+        if len(folds) != cfg.n_folds:
+            raise ValueError(f"config n_folds={cfg.n_folds} but {cfg.splits_file} freezes {len(folds)} folds")
+    else:
+        folds = make_folds(df, cfg.split, cfg.n_folds, cfg.val_fraction, cfg.seed)
     fold_info, tables, histories = [], [], {}
     started = time.time()
     for k, fold in enumerate(folds):
-        assert_no_isolate_leakage(df, fold)
+        if not leaky:
+            assert_no_group_leakage(df, fold)
         info = describe_fold(df, fold, classes)
         fold_info.append(info)
-        log.info("%s: %d/%d train/val images, %d/%d isolates, val classes without isolates: %s", fold.name,
-                 info["train_images"], info["val_images"], info["train_isolates"], info["val_isolates"],
-                 info["val_classes_without_isolates"])
+        log.info("%s: %d/%d train/val images, %d/%d groups, val classes without groups: %s", fold.name,
+                 info["train_images"], info["val_images"], info["train_groups"], info["val_groups"],
+                 info["val_classes_without_groups"])
         model, histories[fold.name] = fit_model(df.iloc[fold.train_idx], cfg, classes, device, cfg.seed + k)
         val_df = df.iloc[fold.val_idx]
-        probs = predict_probs(model, val_df, classes, cfg.image_size, cfg.autocontrast, device, cfg.batch_size)
+        probs = predict_probs(model, val_df, classes, cfg.image_size, cfg.autocontrast, device, cfg.batch_size,
+                              cfg.plate_crop)
         tables.append(prediction_table(val_df, probs, classes, fold.name))
         ckpt_path = run_dir / "model.pt" if cfg.split == "holdout" else run_dir / "folds" / f"{fold.name}.pt"
         save_checkpoint(ckpt_path, model, cfg.arch, classes, cfg.image_size, cfg.autocontrast, {**meta, "fold": fold.name})
 
-    metrics = write_report(run_dir, pd.concat(tables, ignore_index=True), classes, cfg.bootstrap, cfg.seed,
-                           {"split": cfg.split, "folds": fold_info, "train_history": histories,
-                            "note": "validation predictions are out-of-fold, real images only, isolates disjoint from training"})
+    preds = pd.concat(tables, ignore_index=True).assign(leaky=leaky)
+    metrics = write_report(run_dir, preds, classes, cfg.bootstrap, cfg.seed,
+                           {"split": cfg.split, "leaky": leaky, "provenance": provenance, "folds": fold_info,
+                            "train_history": histories,
+                            "note": "LEAKY, comparison only: groups shared between training and validation" if leaky
+                            else "validation predictions are out-of-fold, real images only, groups disjoint from training"})
     if cfg.split != "holdout" and cfg.fit_final:
-        log.info("final model on all %d isolates", df["isolate_id"].nunique())
+        log.info("final model on all %d groups", df["group"].nunique())
         model, _ = fit_model(df, cfg, classes, device, cfg.seed)
         save_checkpoint(run_dir / "model.pt", model, cfg.arch, classes, cfg.image_size, cfg.autocontrast, {**meta, "fold": "all"})
-    log.info("done in %.0fs. image acc=%.3f macro-F1=%.3f | isolate acc=%.3f macro-F1=%.3f -> %s", time.time() - started,
+    if cfg.tracking == "mlflow":
+        log_to_mlflow(run_dir, cfg.run_name, metrics)
+    log.info("%sdone in %.0fs. image acc=%.3f macro-F1=%.3f | isolate acc=%.3f macro-F1=%.3f -> %s",
+             "[leaky, comparison only] " if leaky else "", time.time() - started,
              metrics["image_level"]["accuracy"], metrics["image_level"]["macro"]["f1"],
              metrics["isolate_level"]["accuracy"], metrics["isolate_level"]["macro"]["f1"], run_dir)
     return run_dir
@@ -179,8 +218,10 @@ def evaluate_checkpoint(checkpoint: str | Path, manifest: str | Path, out_dir: s
     classes = meta["classes"]
     df = select(load_manifest(manifest), modality or meta.get("modality", "all"), source)
     _resolve_classes(df, tuple(classes))
-    probs = predict_probs(model, df, classes, meta["image_size"], meta["autocontrast"], device)
+    probs = predict_probs(model, df, classes, meta["image_size"], meta["autocontrast"], device,
+                          plate_crop=meta.get("plate_crop", False))
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     return write_report(out_dir, prediction_table(df, probs, classes, "eval"), classes, n_boot, seed,
-                        {"checkpoint": str(checkpoint), "manifest": str(manifest)})
+                        {"checkpoint": str(checkpoint), "manifest": str(manifest),
+                         "provenance": collect(manifest, checkpoint=checkpoint)})
