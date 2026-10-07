@@ -83,6 +83,7 @@ def test_mlflow_tracking_without_mlflow_installed_names_the_extra(synthetic_mani
 
 def test_mlflow_tracking_logs_params_metrics_and_artifacts(synthetic_manifest, tmp_path, monkeypatch):
     mlflow = pytest.importorskip("mlflow")
+    monkeypatch.chdir(tmp_path)  # MLflow puts artifacts under ./mlruns
     monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{(tmp_path / 'mlflow.db').as_posix()}")
     run_dir = run_training(_cfg(synthetic_manifest, tmp_path, tracking="mlflow", run_name="tracked"))
     [run] = mlflow.search_runs(search_all_experiments=True, filter_string="tags.mlflow.runName = 'tracked'",
