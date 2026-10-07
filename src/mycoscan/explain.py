@@ -22,7 +22,7 @@ from torch import nn
 from torchvision import transforms as T
 
 from .models import adapter, load_checkpoint
-from .transforms import build_transform, to_rgb
+from .transforms import build_transform, plate_circle_crop, to_rgb
 
 
 def gradcam(model: nn.Module, layer: nn.Module, x: torch.Tensor, target: int) -> np.ndarray:
@@ -79,10 +79,12 @@ def explain_images(checkpoint: str | Path, images: list[str], out_dir: str | Pat
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     for i, path in enumerate(images):
-        with Image.open(path) as img:
-            img = to_rgb(img)
-            x = tf(img).unsqueeze(0).to(device)
-            rgb = np.asarray(view(img), dtype=float)
+        with Image.open(path) as raw:
+            img = to_rgb(raw)
+        if meta.get("plate_crop") and meta.get("modality") == "colony":
+            img = plate_circle_crop(img)
+        x = tf(img).unsqueeze(0).to(device)
+        rgb = np.asarray(view(img), dtype=float)
         with torch.no_grad():
             probs = model(x).softmax(dim=1)[0].cpu().numpy()
         target = int(probs.argmax())

@@ -68,6 +68,17 @@ mycoscan train --config configs/cmu_microscopic.toml --set arch=resnet50 --set w
 mycoscan train --config configs/cmu_microscopic.toml --set arch=convnext_tiny --set weights=imagenet22k --set amp=true --set grad_clip=1.0
 ```
 
+### Loss, augmentation and plate crop
+
+| key | values |
+|---|---|
+| `loss` | `ce` (default), `weighted_ce` (class-weighted; needs `imbalance = "none"`), `focal` |
+| `focal_gamma` | focusing exponent of the focal loss, default 2.0 |
+| `label_smoothing` | 0.0 (default) to below 1 |
+| `augmentation` | `standard` (default), `trivial_wide` (TrivialAugment-Wide without its hue-changing operations), `none` |
+| `plate_crop` | `true` crops colony images to the Petri plate circle before any other step, also at evaluation and prediction |
+| `imbalance` | `sampler` (default, balances classes and groups within a class) or `none` |
+
 ### Backbones and initialisation
 
 `arch` is any timm model name, and `weights` picks its initialisation:

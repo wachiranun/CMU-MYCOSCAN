@@ -18,7 +18,8 @@ import torch
 from torch import nn
 
 from .config import Config
-from .data import class_loss_weights, make_loader
+from .data import make_loader
+from .losses import build_loss
 from .manifest import load_manifest, select
 from .metrics import evaluate_predictions, prob_columns
 from .models import apply_finetune, build_model, load_checkpoint, save_checkpoint, train_mode
@@ -48,11 +49,10 @@ def fit_model(train_df: pd.DataFrame, cfg: Config, classes: list[str], device: s
     apply_finetune(model, cfg.finetune)
     model.to(device)
     loader = make_loader(train_df, class_to_idx, cfg.image_size, cfg.autocontrast, train=True,
-                         batch_size=cfg.batch_size, num_workers=cfg.num_workers, imbalance=cfg.imbalance, seed=seed)
-    weights = None
-    if cfg.imbalance == "loss":
-        weights = class_loss_weights(train_df["species"].map(class_to_idx).to_numpy(), len(classes)).to(device)
-    loss_fn = nn.CrossEntropyLoss(weight=weights)
+                         batch_size=cfg.batch_size, num_workers=cfg.num_workers, imbalance=cfg.imbalance, seed=seed,
+                         augmentation=cfg.augmentation, plate_crop=cfg.plate_crop)
+    labels = torch.tensor(train_df["species"].map(class_to_idx).to_numpy())
+    loss_fn = build_loss(cfg.loss, labels, len(classes), cfg.label_smoothing, cfg.focal_gamma).to(device)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(cfg.epochs, 1))
@@ -87,9 +87,10 @@ def fit_model(train_df: pd.DataFrame, cfg: Config, classes: list[str], device: s
 
 @torch.no_grad()
 def predict_probs(model: nn.Module, df: pd.DataFrame, classes: list[str], image_size: int, autocontrast: bool,
-                  device: str, batch_size: int = 32) -> np.ndarray:
+                  device: str, batch_size: int = 32, plate_crop: bool = False) -> np.ndarray:
     class_to_idx = {c: i for i, c in enumerate(classes)}
-    loader = make_loader(df, class_to_idx, image_size, autocontrast, train=False, batch_size=batch_size, num_workers=0)
+    loader = make_loader(df, class_to_idx, image_size, autocontrast, train=False, batch_size=batch_size, num_workers=0,
+                         plate_crop=plate_crop)
     model.eval()
     return np.concatenate([model(x.to(device)).softmax(dim=1).cpu().numpy() for x, _ in loader])
 
@@ -149,7 +150,8 @@ def run_training(cfg: Config) -> Path:
     (run_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2), encoding="utf-8")
     log.info("run %s: %d images, %d groups, %d classes, device=%s", cfg.run_name, len(df),
              df["group"].nunique(), len(classes), device)
-    meta = {"modality": cfg.modality, "source": cfg.source, "finetune": cfg.finetune, "weights_init": cfg.weights}
+    meta = {"modality": cfg.modality, "source": cfg.source, "finetune": cfg.finetune, "weights_init": cfg.weights,
+            "plate_crop": cfg.plate_crop}
 
     folds = make_folds(df, cfg.split, cfg.n_folds, cfg.val_fraction, cfg.seed)
     fold_info, tables, histories = [], [], {}
@@ -163,7 +165,8 @@ def run_training(cfg: Config) -> Path:
                  info["val_classes_without_groups"])
         model, histories[fold.name] = fit_model(df.iloc[fold.train_idx], cfg, classes, device, cfg.seed + k)
         val_df = df.iloc[fold.val_idx]
-        probs = predict_probs(model, val_df, classes, cfg.image_size, cfg.autocontrast, device, cfg.batch_size)
+        probs = predict_probs(model, val_df, classes, cfg.image_size, cfg.autocontrast, device, cfg.batch_size,
+                              cfg.plate_crop)
         tables.append(prediction_table(val_df, probs, classes, fold.name))
         ckpt_path = run_dir / "model.pt" if cfg.split == "holdout" else run_dir / "folds" / f"{fold.name}.pt"
         save_checkpoint(ckpt_path, model, cfg.arch, classes, cfg.image_size, cfg.autocontrast, {**meta, "fold": fold.name})
@@ -189,7 +192,8 @@ def evaluate_checkpoint(checkpoint: str | Path, manifest: str | Path, out_dir: s
     classes = meta["classes"]
     df = select(load_manifest(manifest), modality or meta.get("modality", "all"), source)
     _resolve_classes(df, tuple(classes))
-    probs = predict_probs(model, df, classes, meta["image_size"], meta["autocontrast"], device)
+    probs = predict_probs(model, df, classes, meta["image_size"], meta["autocontrast"], device,
+                          plate_crop=meta.get("plate_crop", False))
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     return write_report(out_dir, prediction_table(df, probs, classes, "eval"), classes, n_boot, seed,

@@ -7,21 +7,25 @@ import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
-from .transforms import build_transform, to_rgb
+from .transforms import build_transform, plate_circle_crop, to_rgb
 
 
 class ImageDataset(Dataset):
-    def __init__(self, paths: list[str], labels: list[int], transform):
+    """crop[i]: plate-circle crop image i before its transform (colony images, when configured)."""
+
+    def __init__(self, paths: list[str], labels: list[int], transform, crop: list[bool] | None = None):
         self.paths = paths
         self.labels = labels
         self.transform = transform
+        self.crop = crop or [False] * len(paths)
 
     def __len__(self) -> int:
         return len(self.paths)
 
     def __getitem__(self, i: int):
         with Image.open(self.paths[i]) as img:
-            return self.transform(to_rgb(img)), self.labels[i]
+            rgb = to_rgb(img)
+        return self.transform(plate_circle_crop(rgb) if self.crop[i] else rgb), self.labels[i]
 
 
 def balanced_sample_weights(species: pd.Series, group: pd.Series) -> np.ndarray:
@@ -43,9 +47,11 @@ def class_loss_weights(labels: np.ndarray, n_classes: int) -> torch.Tensor:
 
 
 def make_loader(df: pd.DataFrame, class_to_idx: dict[str, int], image_size: int, autocontrast: bool,
-                train: bool, batch_size: int, num_workers: int, imbalance: str = "none", seed: int = 0) -> DataLoader:
+                train: bool, batch_size: int, num_workers: int, imbalance: str = "none", seed: int = 0,
+                augmentation: str = "standard", plate_crop: bool = False) -> DataLoader:
     labels = [class_to_idx[s] for s in df["species"]]
-    ds = ImageDataset(df["image_path"].tolist(), labels, build_transform(image_size, autocontrast, train))
+    crop = (df["modality"] == "colony").tolist() if plate_crop else None
+    ds = ImageDataset(df["image_path"].tolist(), labels, build_transform(image_size, autocontrast, train, augmentation), crop)
     generator = torch.Generator().manual_seed(seed)
     if train and imbalance == "sampler":
         weights = balanced_sample_weights(df["species"], df["group"])
