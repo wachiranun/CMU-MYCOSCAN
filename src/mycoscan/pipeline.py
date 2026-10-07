@@ -86,7 +86,8 @@ def predict_probs(model: nn.Module, df: pd.DataFrame, classes: list[str], image_
 
 
 def prediction_table(df: pd.DataFrame, probs: np.ndarray, classes: list[str], fold: str) -> pd.DataFrame:
-    keep = ["image_path", "species", "isolate_id", "modality", "view", "device", "day", "source"]
+    keep = ["image_path", "species", "isolate_id", "group_id", "group", "modality", "view", "device", "day",
+            "source", "genus", "temperature", "phase", "fov_id", "z_index"]
     table = df[keep].reset_index(drop=True).copy()
     table["fold"] = fold
     table["predicted"] = [classes[i] for i in probs.argmax(axis=1)]
@@ -137,8 +138,8 @@ def run_training(cfg: Config) -> Path:
     run_dir = Path(cfg.output_dir) / cfg.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2), encoding="utf-8")
-    log.info("run %s: %d images, %d isolates, %d classes, device=%s", cfg.run_name, len(df),
-             df["isolate_id"].nunique(), len(classes), device)
+    log.info("run %s: %d images, %d groups, %d classes, device=%s", cfg.run_name, len(df),
+             df["group"].nunique(), len(classes), device)
     meta = {"modality": cfg.modality, "source": cfg.source, "finetune": cfg.finetune, "weights_init": cfg.weights}
 
     folds = make_folds(df, cfg.split, cfg.n_folds, cfg.val_fraction, cfg.seed)
@@ -148,9 +149,9 @@ def run_training(cfg: Config) -> Path:
         assert_no_isolate_leakage(df, fold)
         info = describe_fold(df, fold, classes)
         fold_info.append(info)
-        log.info("%s: %d/%d train/val images, %d/%d isolates, val classes without isolates: %s", fold.name,
-                 info["train_images"], info["val_images"], info["train_isolates"], info["val_isolates"],
-                 info["val_classes_without_isolates"])
+        log.info("%s: %d/%d train/val images, %d/%d groups, val classes without groups: %s", fold.name,
+                 info["train_images"], info["val_images"], info["train_groups"], info["val_groups"],
+                 info["val_classes_without_groups"])
         model, histories[fold.name] = fit_model(df.iloc[fold.train_idx], cfg, classes, device, cfg.seed + k)
         val_df = df.iloc[fold.val_idx]
         probs = predict_probs(model, val_df, classes, cfg.image_size, cfg.autocontrast, device, cfg.batch_size)
@@ -160,9 +161,9 @@ def run_training(cfg: Config) -> Path:
 
     metrics = write_report(run_dir, pd.concat(tables, ignore_index=True), classes, cfg.bootstrap, cfg.seed,
                            {"split": cfg.split, "folds": fold_info, "train_history": histories,
-                            "note": "validation predictions are out-of-fold, real images only, isolates disjoint from training"})
+                            "note": "validation predictions are out-of-fold, real images only, groups disjoint from training"})
     if cfg.split != "holdout" and cfg.fit_final:
-        log.info("final model on all %d isolates", df["isolate_id"].nunique())
+        log.info("final model on all %d groups", df["group"].nunique())
         model, _ = fit_model(df, cfg, classes, device, cfg.seed)
         save_checkpoint(run_dir / "model.pt", model, cfg.arch, classes, cfg.image_size, cfg.autocontrast, {**meta, "fold": "all"})
     log.info("done in %.0fs. image acc=%.3f macro-F1=%.3f | isolate acc=%.3f macro-F1=%.3f -> %s", time.time() - started,

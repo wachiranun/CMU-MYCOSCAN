@@ -29,18 +29,25 @@ Every dataset is a CSV manifest with one row per image. Image paths are relative
 |---|---|---|
 | `image_path` | yes | relative or absolute path |
 | `species` | yes | class label, for example `Talaromyces_marneffei` |
-| `isolate_id` | yes, may be blank | sequencing-confirmed isolate. A blank value makes the image its own group (use this for OpenFungi). |
+| `isolate_id` | yes, blank for OpenFungi | sequencing-confirmed isolate. Required for every CMU row. |
+| `group_id` | OpenFungi only | pseudo-group of repeated shots of one plate. Required for every OpenFungi row. |
 | `modality` | yes | `colony` or `microscopic` |
 | `view` | no | `obverse`, `reverse`, `na` (default) |
 | `device` | no | `microscope_camera`, `smartphone`, `unknown` (default) |
 | `day` | no | growth day, for example `3`, `7`, `14` |
 | `source` | no | `cmu` (default) or `openfungi` |
+| `genus` | no | taxonomic rollup of `species` |
+| `temperature` | no | incubation temperature |
+| `phase` | no | `mold`, `yeast`, `na` (default); for dimorphic isolates |
+| `fov_id`, `z_index` | no | field of view and Z-plane of a microscopic image |
+| `sha256` | no | hash of the image file |
+| `split`, `fold` | no | written by the splits file, not by hand |
 
-Loading fails with a clear error for a missing column, an unknown value, a missing image file, or an isolate labelled with two species.
+Loading adds a `group` column: `isolate_id` for CMU rows and `group_id` for OpenFungi rows. It is the unit of splitting, sampling and bootstrapping. Loading fails with a clear error for a missing column, an unknown value, a missing image file, a CMU row without an isolate, an OpenFungi row without a group, or an isolate labelled with two species.
 
 ## Train with staged transfer
 
-1. Put OpenFungi at `data/openfungi/manifest.csv` with `source=openfungi`.
+1. Put OpenFungi at `data/openfungi/manifest.csv` with `source=openfungi` and a `group_id` per image (repeated shots of one plate share a group; the OpenFungi manifest builder, a separate ticket, assigns these).
 2. Put CMU images at `data/cmu/manifest.csv` with `source=cmu`.
 3. Edit the `classes` list in `configs/cmu_*.toml` to the confirmed 10 species/groups.
 4. Run the stages in order:

@@ -12,7 +12,7 @@ def _manifest_rows():
             iso = f"S{c}-I{i}"
             for device in ("microscope_camera", "smartphone"):
                 for fov in range(4):
-                    rows.append({"species": f"S{c}", "isolate_id": iso, "device": device, "fov": fov})
+                    rows.append({"species": f"S{c}", "isolate_id": iso, "group": iso, "device": device, "fov": fov})
     return pd.DataFrame(rows)
 
 
@@ -62,10 +62,24 @@ def test_loio_has_one_fold_per_isolate():
     assert all(len(_val_isolates(df, f)) == 1 for f in folds)
 
 
+def test_folds_keep_a_group_together_even_when_isolate_ids_differ():
+    rows = []
+    for c in range(3):
+        for g in range(4):
+            for shot in range(2):
+                rows.append({"species": f"S{c}", "isolate_id": f"img:S{c}-G{g}-{shot}", "group": f"S{c}-G{g}"})
+    df = pd.DataFrame(rows)
+    for fold in make_folds(df, "kfold", n_folds=2, seed=0):
+        train_groups = set(df["group"].iloc[fold.train_idx])
+        val_groups = set(df["group"].iloc[fold.val_idx])
+        assert train_groups & val_groups == set()
+        assert_no_isolate_leakage(df, fold)
+
+
 def test_leakage_detector_rejects_shared_isolate():
     df = _manifest_rows()
-    same_isolate = np.flatnonzero(df["isolate_id"] == "S0-I0")
-    rest = np.flatnonzero(df["isolate_id"] != "S0-I0")
+    same_isolate = np.flatnonzero(df["group"] == "S0-I0")
+    rest = np.flatnonzero(df["group"] != "S0-I0")
     leaky = Fold("leaky", np.concatenate([rest, same_isolate[:1]]), same_isolate[1:])
     with pytest.raises(AssertionError, match="S0-I0"):
         assert_no_isolate_leakage(df, leaky)

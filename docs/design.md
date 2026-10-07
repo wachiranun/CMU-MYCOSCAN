@@ -2,23 +2,23 @@
 
 This document explains the choices behind `src/mycoscan`. Each choice says what the protocol (sections 2.1 to 2.4) asks for, what the code does, and why.
 
-## The isolate is the unit, not the image
+## The group is the unit, not the image
 
-The CMU data has 25 to 30 isolates. Each isolate has many images: colony obverse and reverse at several growth days, and about 30 microscope fields or Z-planes per slide from two devices. Two images of the same isolate are close to duplicates. If one sits in training and the other in validation, the model can score well by recognising the isolate instead of the species.
+The CMU study collects 25 to 30 sequence-confirmed isolates per class, 250 to 300 in all. Each isolate has many images: colony obverse and reverse at several growth days, and 10 to 30 microscope fields or Z-planes per slide from two devices. Two images of the same isolate are close to duplicates. If one sits in training and the other in validation, the model can score well by recognising the isolate instead of the species. OpenFungi has the same problem in a different form: it has no isolate identifiers, but many of its photos are repeated shots of one plate.
 
-So `splits.py` assigns whole isolates to folds, never single images, and `assert_no_isolate_leakage` runs before every fold trains. The same rule drives two other places:
+So the manifest loader derives one `group` column, which is the isolate for CMU rows and a pseudo-group of repeated shots for OpenFungi rows, and everything downstream uses it. `splits.py` assigns whole groups to folds, never single images, and `assert_no_isolate_leakage` runs before every fold trains. The same rule drives two other places:
 
-- The weighted sampler in `data.py` gives every class the same total weight, and every isolate within a class the same share. An isolate photographed 30 times does not outweigh one photographed 5 times.
-- The bootstrap confidence intervals in `metrics.py` resample isolates, not images. Resampling images would treat 30 near-copies as 30 independent cases and make the intervals far too narrow. Isolates are resampled within each species, so every replicate contains every class and the macro averages always cover the same classes.
-- A CMU row without an `isolate_id` fails at load time. A blank ID would otherwise make the image its own group and let it land on the other side of a split from its sibling images. Only OpenFungi rows may leave it blank.
+- The weighted sampler in `data.py` gives every class the same total weight, and every group within a class the same share. An isolate photographed 30 times does not outweigh one photographed 5 times.
+- The bootstrap confidence intervals in `metrics.py` resample groups, not images. Resampling images would treat 30 near-copies as 30 independent cases and make the intervals far too narrow. Groups are resampled within each species, so every replicate contains every class and the macro averages always cover the same classes.
+- A CMU row without an `isolate_id`, or an OpenFungi row without a `group_id`, fails at load time. A blank value would otherwise make the image its own group and let it land on the other side of a split from its sibling images. The only exception is the deliberately leaky image-level split used to reproduce the OpenFungi paper's number, which has to ask for ungrouped rows explicitly.
 
 ## Why k-fold is the headline estimate and 80/20 is kept for the protocol
 
-With 2 to 3 isolates per class, a single 80/20 isolate split holds out about 5 isolates in total. That leaves about half of the 10 classes with no validation isolate at all. Their sensitivity cannot be computed, and the remaining classes rest on one isolate each. The synthetic run shows this directly. Its holdout fold had no validation isolate for 5 of 10 classes.
+A single 80/20 isolate split of 25 to 30 isolates per class holds out 5 or 6 isolates per class. That is enough for a go/no-go on overall accuracy but gives per-class estimates with very wide intervals, and in the interim runs on partial data (12 or 20 isolates per class) it leaves some classes with one or two validation isolates. The synthetic set, which has only 2 to 3 isolates per class, shows the extreme case: its holdout fold had no validation isolate for 5 of 10 classes.
 
-The code implements the protocol's 80/20 split (`split = "holdout"`) and records which classes it leaves without validation isolates. The default is 5-fold isolate-level cross-validation (`split = "kfold"`). Every isolate is validated exactly once, by a model that never saw it, and metrics are computed on the pooled out-of-fold predictions. Leave-one-isolate-out (`split = "loio"`) is the most data-efficient option and costs one training run per isolate. With head-only fine-tuning on a GPU that cost is small.
+The code implements the protocol's 80/20 split (`split = "holdout"`) and records which classes it leaves without validation groups. The default is 5-fold group-level cross-validation (`split = "kfold"`). Every group is validated exactly once, by a model that never saw it, and metrics are computed on the pooled out-of-fold predictions over every development isolate, which is the highest-precision estimate available. Leave-one-group-out (`split = "loio"`) is the most data-efficient option and costs one training run per group. With head-only fine-tuning on a GPU that cost is small.
 
-sklearn's `StratifiedKFold` refuses a fold count larger than every class's member count, which is the normal case here. `splits.py` instead deals each class's isolates across folds in turn. Each class is spread over as many folds as it has isolates, and fold sizes differ by at most one isolate.
+sklearn's `StratifiedKFold` refuses a fold count larger than every class's member count, which small OpenFungi classes and interim CMU counts can hit. `splits.py` instead deals each class's groups across folds in turn. Each class is spread over as many folds as it has groups, and fold sizes differ by at most one group.
 
 ## Staged transfer
 
@@ -30,13 +30,13 @@ OpenFungi has 1,249 images, which is too few to pretrain a CNN from scratch. "Pr
 
 `finetune = "head"` trains only the new fully connected head, as the protocol says. `finetune = "partial"` also trains the last dense block (DenseNet-121) or `layer4` (ResNet-50). `finetune = "full"` trains everything. Frozen BatchNorm layers stay in eval mode during training, so their running statistics keep the pretrained values.
 
-Head-only is the safer default for 25 to 30 isolates. Partial unfreezing may fit fungal texture better, but it has far more parameters to overfit with. Which one wins on the real data is an empirical question, and the k-fold estimate is the way to settle it.
+Head-only was the safer default when the study was expected to have only a few isolates per class. With 25 to 30 isolates per class, partial and full fine-tuning become realistic, and which depth wins is an empirical question that the pilot on OpenFungi and the k-fold estimate on CMU data settle.
 
 ## One model per modality
 
 Colony photographs and microscope fields share almost nothing visually. The scale, background, colour cues and diagnostic structures all differ. A single model would also be dominated by the microscopic set, which has about 10 times more images. So each config trains one modality (`modality = "colony"` or `"microscopic"`). The checkpoint records its modality so the web app can route an image to the right model. `modality = "all"` still exists for experiments.
 
-Because predictions are stored per image with `isolate_id`, combining the two models for one isolate is a mean over both prediction tables (`metrics.aggregate_by_isolate`). This matches how a mycologist combines the colony and the slide.
+Because predictions are stored per image with their `group`, combining the two models for one isolate is a mean over both prediction tables (`metrics.aggregate_by_isolate`). This matches how a mycologist combines the colony and the slide.
 
 ## Preprocessing and augmentation
 

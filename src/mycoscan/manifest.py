@@ -3,13 +3,24 @@
 Columns:
     image_path  relative to the manifest's folder, or absolute
     species     class label
-    isolate_id  sequencing-confirmed isolate; the unit of splitting. Required for CMU
-                rows. Blank is allowed only for OpenFungi, where each image becomes its own group.
+    isolate_id  sequencing-confirmed isolate. Required for CMU rows; blank for OpenFungi.
+    group_id    pseudo-group of repeated shots of one plate. Required for OpenFungi rows
+                (built by the OpenFungi manifest builder); ignored for CMU rows.
     modality    colony | microscopic
     view        obverse | reverse | na            (optional, default na)
     device      microscope_camera | smartphone | unknown   (optional, default unknown)
     day         growth day, integer or blank     (optional)
     source      cmu | openfungi                   (optional, default cmu)
+    genus       taxonomic rollup of species       (optional)
+    temperature incubation temperature            (optional)
+    phase       mold | yeast | na                 (optional, default na; dimorphic isolates)
+    fov_id      field-of-view identifier          (optional)
+    z_index     Z-plane, integer or blank         (optional)
+    sha256      hash of the image file            (optional)
+    split, fold assigned by the splits file       (optional)
+
+Loading adds one derived column, `group`: the unit of splitting, sampling and
+bootstrapping. It is `isolate_id` for CMU rows and `group_id` for OpenFungi rows.
 """
 from __future__ import annotations
 
@@ -18,16 +29,23 @@ from pathlib import Path
 import pandas as pd
 
 REQUIRED = ("image_path", "species", "isolate_id", "modality")
-DEFAULTS = {"view": "na", "device": "unknown", "day": "", "source": "cmu"}
+DEFAULTS = {
+    "view": "na", "device": "unknown", "day": "", "source": "cmu", "group_id": "",
+    "genus": "", "temperature": "", "phase": "na", "fov_id": "", "z_index": "", "sha256": "", "split": "", "fold": "",
+}
 ALLOWED = {
     "modality": {"colony", "microscopic"},
     "view": {"obverse", "reverse", "na"},
     "device": {"microscope_camera", "smartphone", "unknown"},
     "source": {"cmu", "openfungi"},
+    "phase": {"mold", "yeast", "na"},
 }
+INTEGER = ("day", "z_index")
 
 
-def load_manifest(path: str | Path) -> pd.DataFrame:
+def load_manifest(path: str | Path, allow_ungrouped: bool = False) -> pd.DataFrame:
+    """allow_ungrouped: let OpenFungi rows without a group_id load as one group per image.
+    Only for the leaky image-level comparison split; grouped splits must refuse them."""
     path = Path(path)
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
     missing = [c for c in REQUIRED if c not in df.columns]
@@ -55,11 +73,20 @@ def load_manifest(path: str | Path) -> pd.DataFrame:
     if blank_cmu:
         raise ValueError(f"{path}: {len(blank_cmu)} CMU images have no isolate_id, e.g. {blank_cmu[:3]}")
     df.loc[no_isolate, "isolate_id"] = "img:" + df.loc[no_isolate, "image_path"]
+    df["group_id"] = df["group_id"].str.strip()
+    ungrouped = (df["source"] == "openfungi") & (df["group_id"] == "")
+    if ungrouped.any() and not allow_ungrouped:
+        examples = df.loc[ungrouped, "image_path"].tolist()
+        raise ValueError(f"{path}: {len(examples)} OpenFungi images have no group_id, e.g. {examples[:3]}; "
+                         "build pseudo-groups first, or pass allow_ungrouped=True for a leaky image-level split")
+    df.loc[ungrouped, "group_id"] = "img:" + df.loc[ungrouped, "image_path"]
+    df["group"] = df["isolate_id"].where(df["source"] == "cmu", df["group_id"])
     species_per_isolate = df.groupby("isolate_id")["species"].nunique()
     conflicting = species_per_isolate[species_per_isolate > 1].index.tolist()
     if conflicting:
         raise ValueError(f"{path}: isolates labelled with more than one species: {conflicting[:5]}")
-    df["day"] = pd.to_numeric(df["day"], errors="coerce").astype("Int64")
+    for col in INTEGER:
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
     return df.reset_index(drop=True)
 
 

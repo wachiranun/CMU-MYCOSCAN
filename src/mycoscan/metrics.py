@@ -1,9 +1,11 @@
-"""Classification metrics from the confusion matrix, one-vs-rest AUC, isolate-level
-aggregation, and isolate-clustered bootstrap confidence intervals.
+"""Classification metrics from the confusion matrix, one-vs-rest AUC, group-level
+aggregation, and group-clustered bootstrap confidence intervals.
 
-Images of one isolate are correlated, so the bootstrap resamples isolates, not images,
-and it resamples within each species so every replicate keeps every class. When some
-class has only one isolate (the 80/20 holdout), it resamples isolates without strata.
+The unit is the prediction table's `group` column: the isolate for CMU rows (the
+clinical unit, hence the `isolate_level` key) and the pseudo-group of repeated shots
+for OpenFungi rows. Images of one group are correlated, so the bootstrap resamples
+groups, not images, and it resamples within each species so every replicate keeps
+every class. When some class has only one group, it resamples groups without strata.
 A class that has validation support but is never predicted gets PPV 0, not "undefined".
 """
 from __future__ import annotations
@@ -80,18 +82,18 @@ def prob_columns(classes: list[str]) -> list[str]:
 
 
 def aggregate_by_isolate(preds: pd.DataFrame, classes: list[str]) -> pd.DataFrame:
-    """Mean-probability vote over all images of an isolate (the clinical unit)."""
+    """Mean-probability vote over all images of a group (the isolate for CMU data)."""
     cols = prob_columns(classes)
-    return preds.groupby("isolate_id").agg({"species": "first", **{c: "mean" for c in cols}}).reset_index()
+    return preds.groupby("group").agg({"species": "first", **{c: "mean" for c in cols}}).reset_index()
 
 
 def _bootstrap(preds: pd.DataFrame, classes: list[str], n_boot: int, seed: int) -> dict:
     cols = prob_columns(classes)
     class_idx = {c: i for i, c in enumerate(classes)}
-    groups = preds.groupby("isolate_id").indices
-    species_of = preds.groupby("isolate_id")["species"].first()
+    groups = preds.groupby("group").indices
+    species_of = preds.groupby("group")["species"].first()
     strata = [species_of.index[species_of == s].tolist() for s in species_of.unique()]
-    # A class with a single isolate has nothing to resample within; stratifying
+    # A class with a single group has nothing to resample within; stratifying
     # would freeze it and report a falsely narrow interval.
     stratified = min(len(stratum) for stratum in strata) >= 2
     if not stratified:
@@ -108,11 +110,11 @@ def _bootstrap(preds: pd.DataFrame, classes: list[str], n_boot: int, seed: int) 
         for m in PER_CLASS:
             samples[f"macro_{m}"].append(rep["macro"][m])
     ci = {k: [float(np.nanpercentile(v, 2.5)), float(np.nanpercentile(v, 97.5))] for k, v in samples.items()}
-    return {"method": "isolates within class" if stratified else "isolates", "replicates": n_boot, **ci}
+    return {"method": "groups within class" if stratified else "groups", "replicates": n_boot, **ci}
 
 
 def evaluate_predictions(preds: pd.DataFrame, classes: list[str], n_boot: int = 1000, seed: int = 0) -> dict:
-    """preds: one row per image with species, isolate_id and prob_<class> columns."""
+    """preds: one row per image with species, group and prob_<class> columns."""
     class_idx = {c: i for i, c in enumerate(classes)}
     cols = prob_columns(classes)
     iso = aggregate_by_isolate(preds, classes)

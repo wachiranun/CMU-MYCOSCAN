@@ -54,10 +54,11 @@ def test_end_to_end_train_eval_explain_predict(synthetic_manifest, tmp_path):
                                 classes=PLACEHOLDER_CMU_CLASSES))
     preds = pd.read_csv(run_dir / "predictions.csv")
     metrics = json.loads((run_dir / "metrics.json").read_text())
-    all_isolates = set(select(load_manifest(synthetic_manifest), "microscopic", "cmu")["isolate_id"])
-    assert len(all_isolates) == 25
-    assert preds["isolate_id"].nunique() == 5
-    assert metrics["image_level"]["n"] == len(preds) == 10
+    micro = select(load_manifest(synthetic_manifest), "microscopic", "cmu")
+    assert micro["isolate_id"].nunique() == 25
+    held_out = set(preds["isolate_id"])
+    assert len(held_out) == 5
+    assert metrics["image_level"]["n"] == len(preds) == micro["isolate_id"].isin(held_out).sum()
     assert metrics["isolate_level"]["n"] == 5
     assert (run_dir / "confusion_isolate_level.png").stat().st_size > 0
 
