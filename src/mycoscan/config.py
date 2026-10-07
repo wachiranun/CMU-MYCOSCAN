@@ -14,7 +14,7 @@ CHOICES = {
     "imbalance": {"sampler", "none"},
     "loss": {"ce", "weighted_ce", "focal"},
     "augmentation": {"none", "standard", "trivial_wide"},
-    "split": {"holdout", "kfold", "loio"},
+    "split": {"holdout", "kfold", "loio", "image_random"},
 }
 
 
@@ -38,6 +38,7 @@ class Config:
     augmentation: str = "standard"
     plate_crop: bool = False
     split: str = "kfold"
+    splits_file: str = ""
     n_folds: int = 5
     val_fraction: float = 0.2
     fit_final: bool = True
@@ -71,6 +72,8 @@ class Config:
             raise ValueError("config focal_gamma must be >= 0")
         if self.grad_clip < 0:
             raise ValueError("config grad_clip must be >= 0 (0 turns clipping off)")
+        if self.splits_file and not Path(self.splits_file).is_file():
+            raise ValueError(f"config splits_file={self.splits_file!r} does not exist")
         if not 0 < self.val_fraction < 1:
             raise ValueError("config val_fraction must be in (0, 1)")
 

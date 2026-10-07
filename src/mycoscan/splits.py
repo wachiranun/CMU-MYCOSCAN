@@ -5,13 +5,24 @@ pseudo-group of repeated shots for OpenFungi rows. Folds are computed on the
 group table (one row per group) and only then mapped back to image rows, so
 every FOV, Z-plane, device, view and timepoint of a group always lands on the
 same side of a split.
+
+The frozen splits file (`splits_v1.csv`) is written once: every OpenFungi group
+goes to Pool A (development, with a fold) or Pool B (external test, never
+trained on). It records the hash of the manifest it was built from, and a
+sidecar records its own hash, so a training run can verify both before using it.
+The only split that ignores groups is `image_random`, kept to reproduce the
+leaky image-level number of the OpenFungi paper.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from .manifest import load_manifest
+from .provenance import sha256_file
 
 
 @dataclass(frozen=True)
@@ -60,7 +71,89 @@ def make_folds(df: pd.DataFrame, strategy: str, n_folds: int = 5, val_fraction: 
         return [_to_image_fold(df, groups, f"fold{i}", v) for i, v in enumerate(vals)]
     if strategy == "loio":
         return [_to_image_fold(df, groups, f"loio_{g}", [i]) for i, g in enumerate(groups["group"])]
+    if strategy == "image_random":
+        images = df[["species"]].reset_index(drop=True)
+        vals = _stratified_group_folds(images, n_folds, seed)
+        return [Fold(f"fold{i}", np.setdiff1d(np.arange(len(df)), v), v) for i, v in enumerate(vals)]
     raise ValueError(f"unknown split strategy {strategy!r}")
+
+
+def frozen_folds(df: pd.DataFrame) -> list[Fold]:
+    """One fold per value of the `fold` column a splits file merged in."""
+    return [Fold(f"fold{k}", np.flatnonzero(df["fold"] != k), np.flatnonzero(df["fold"] == k))
+            for k in sorted(df["fold"].unique(), key=int)]
+
+
+def partition_pools(df: pd.DataFrame, b_fraction: float = 0.3, n_folds: int = 5, seed: int = 0) -> pd.DataFrame:
+    """One row per group: pool A or B, and a fold for Pool A groups.
+
+    Within each class, groups are ordered by modality and spread evenly over that order,
+    so Pool B takes round(b_fraction * n) groups of every class, split across modalities in proportion.
+    """
+    rng = np.random.default_rng(seed)
+    groups = df.groupby("group", sort=True).agg(species=("species", "first"), modality=("modality", "first")).reset_index()
+    groups["pool"] = "A"
+    for species in sorted(groups["species"].unique()):
+        members = groups[groups["species"] == species]
+        ordered = members.loc[rng.permutation(members.index)].sort_values("modality", kind="stable").index
+        k = round(b_fraction * len(ordered))
+        if k:
+            picks = np.floor((np.arange(k) + rng.uniform()) * len(ordered) / k).astype(int)
+            groups.loc[ordered[picks], "pool"] = "B"
+    groups["fold"] = ""
+    pool_a = groups[groups["pool"] == "A"].reset_index()
+    for k, members in enumerate(_stratified_group_folds(pool_a, n_folds, seed)):
+        groups.loc[pool_a["index"].iloc[members], "fold"] = str(k)
+    return groups
+
+
+def sidecar_path(splits_path: Path) -> Path:
+    return splits_path.with_name(splits_path.name + ".sha256")
+
+
+def write_splits_file(manifest: str | Path, out: str | Path, b_fraction: float = 0.3, n_folds: int = 5,
+                      seed: int = 0) -> Path:
+    """Partition the manifest's OpenFungi groups into Pool A / Pool B, once. Refuses to overwrite."""
+    out = Path(out)
+    for path in (out, sidecar_path(out)):
+        if path.exists():
+            raise FileExistsError(f"{path} exists; a splits file is created once and never overwritten")
+    df = load_manifest(manifest)
+    openfungi = df[df["source"] == "openfungi"]
+    if openfungi.empty:
+        raise ValueError(f"{manifest} has no OpenFungi rows to partition")
+    splits = partition_pools(openfungi, b_fraction, n_folds, seed)
+    splits["manifest_sha256"] = sha256_file(manifest)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "x", encoding="utf-8", newline="") as f:
+        splits.to_csv(f, index=False)
+    with open(sidecar_path(out), "x", encoding="utf-8") as f:
+        f.write(f"{sha256_file(out)}  {out.name}\n")
+    return out
+
+
+def load_splits_file(path: str | Path, manifest: str | Path) -> pd.DataFrame:
+    """The splits table, after checking it is unmodified and was built from this exact manifest."""
+    path = Path(path)
+    recorded = sidecar_path(path).read_text(encoding="utf-8").split()[0]
+    if sha256_file(path) != recorded:
+        raise ValueError(f"{path} does not match the hash in {sidecar_path(path).name}; the splits file was modified")
+    splits = pd.read_csv(path, dtype=str, keep_default_na=False)
+    built_from = set(splits["manifest_sha256"])
+    actual = sha256_file(manifest)
+    if built_from != {actual}:
+        raise ValueError(f"manifest {manifest} has hash {actual}, but {path} was built from a manifest with hash "
+                         f"{sorted(built_from)}; refusing to reuse a frozen split on a changed manifest")
+    return splits
+
+
+def apply_splits(df: pd.DataFrame, splits: pd.DataFrame) -> pd.DataFrame:
+    """Merge each group's pool and fold into the image rows. Every group must be in the splits file."""
+    unknown = sorted(set(df["group"]) - set(splits["group"]))
+    if unknown:
+        raise ValueError(f"{len(unknown)} groups are not in the splits file, e.g. {unknown[:5]}")
+    by_group = splits.set_index("group")
+    return df.assign(pool=df["group"].map(by_group["pool"]), fold=df["group"].map(by_group["fold"]))
 
 
 def assert_no_group_leakage(df: pd.DataFrame, fold: Fold) -> None:

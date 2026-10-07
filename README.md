@@ -41,7 +41,8 @@ Every dataset is a CSV manifest with one row per image. Image paths are relative
 | `phase` | no | `mold`, `yeast`, `na` (default); for dimorphic isolates |
 | `fov_id`, `z_index` | no | field of view and Z-plane of a microscopic image |
 | `sha256` | no | hash of the image file |
-| `split`, `fold` | no | reserved for the frozen splits file of a later ticket; leave blank |
+| `split` | no | reserved for the sealed CMU test set; a training loader refuses `test` rows |
+| `fold` | no | leave blank; a run with a `splits_file` fills it in |
 
 Loading adds a `group` column: `isolate_id` for CMU rows and `group_id` for OpenFungi rows. It is the unit of splitting, sampling and bootstrapping. Loading fails with a clear error for a missing column, an unknown value, a missing image file, a CMU row without an isolate, an OpenFungi row without a group, or an isolate labelled with two species.
 
@@ -92,6 +93,16 @@ mycoscan train --config configs/cmu_microscopic.toml --set arch=convnext_tiny --
 | a path | an earlier-stage checkpoint of the same arch; its head is replaced |
 
 To pin an exact timm tag, put it in `arch` (`arch = "convnext_tiny.fb_in22k_ft_in1k"`). A config whose arch has no weights of the requested kind fails at load time and lists the tags it does have. Verified to build and train: `convnext_tiny`, `convnext_small`, `tf_efficientnetv2_s`, `densenet121`, `resnet50`, `vit_small_patch14_dinov2`, `vit_small_patch16_dinov3`, `vit_base_patch16_224`, `convnext_small.dinov3_lvd1689m`. Transformers are built for `image_size`. `amp = true` turns on mixed precision (float16 on GPU, bfloat16 on CPU) and `grad_clip` caps the gradient norm (0, the default, turns it off).
+
+### Frozen OpenFungi partition (Pool A / Pool B)
+
+```bash
+mycoscan partition --manifest data/openfungi/manifest.csv --out data/openfungi/splits_v1.csv
+```
+
+This assigns every OpenFungi group to Pool A (70%, development, with 5 cross-validation folds) or Pool B (30%, external test), stratified by class and modality. It writes `splits_v1.csv` and a `splits_v1.csv.sha256` sidecar, and refuses to overwrite either. A run uses it with `splits_file = "data/openfungi/splits_v1.csv"`. The run refuses to start if the manifest's hash differs from the one recorded in the file. It trains and validates on Pool A only, using the frozen folds when `split = "kfold"`. A training loader that receives a Pool B row raises an error naming the row.
+
+`split = "image_random"` splits images at random and ignores groups, which reproduces the leaky OpenFungi paper number. Its outputs are marked `"leaky": true` and its log says "leaky, comparison only".
 
 Each run writes `runs/<run_name>/` with these files:
 

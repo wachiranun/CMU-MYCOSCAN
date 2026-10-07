@@ -17,7 +17,8 @@ Columns:
     fov_id      field-of-view identifier          (optional)
     z_index     Z-plane, integer or blank         (optional)
     sha256      hash of the image file            (optional)
-    split, fold reserved for the frozen splits file of a later ticket; blank until then
+    split       reserved for the sealed CMU test set; a training loader refuses `test` rows
+    fold        leave blank; a run with a splits file fills it from that file
 
 Loading adds one derived column, `group`: the unit of splitting, sampling and
 bootstrapping. It is `isolate_id` for CMU rows and `group_id` for OpenFungi rows.
@@ -45,7 +46,7 @@ INTEGER = ("day", "z_index", "temperature")
 
 def load_manifest(path: str | Path, allow_ungrouped: bool = False) -> pd.DataFrame:
     """allow_ungrouped: let OpenFungi rows without a group_id load as one group per image.
-    Reserved for the leaky image-level comparison split (a later ticket); grouped splits must refuse them."""
+    Only the leaky `image_random` comparison split passes it; grouped splits must refuse them."""
     path = Path(path)
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
     missing = [c for c in REQUIRED if c not in df.columns]

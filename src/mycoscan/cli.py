@@ -1,4 +1,4 @@
-"""mycoscan command line: env | make-synthetic | train | eval | explain | predict | compare."""
+"""mycoscan command line: env | make-synthetic | partition | train | eval | explain | predict | compare."""
 from __future__ import annotations
 
 import argparse
@@ -22,6 +22,12 @@ def _make_synthetic(args) -> None:
     from .synthetic import make_synthetic
 
     print(make_synthetic(args.out, size=args.size, fovs_per_device=args.fovs, seed=args.seed))
+
+
+def _partition(args) -> None:
+    from .splits import write_splits_file
+
+    print(write_splits_file(args.manifest, args.out, args.b_fraction, args.n_folds, args.seed))
 
 
 def _train(args) -> None:
@@ -93,6 +99,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--fovs", type=int, default=6, help="microscopic FOVs per device per isolate")
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(fn=_make_synthetic)
+
+    p = sub.add_parser("partition", help="freeze OpenFungi groups into Pool A (development) and Pool B (external test)")
+    p.add_argument("--manifest", required=True)
+    p.add_argument("--out", required=True, help="splits file to create, e.g. splits_v1.csv; never overwritten")
+    p.add_argument("--b-fraction", type=float, default=0.3, help="share of each class's groups in Pool B")
+    p.add_argument("--n-folds", type=int, default=5, help="cross-validation folds within Pool A")
+    p.add_argument("--seed", type=int, default=0)
+    p.set_defaults(fn=_partition)
 
     p = sub.add_parser("train", help="train with isolate-level validation")
     p.add_argument("--config", required=True)

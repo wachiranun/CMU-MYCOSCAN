@@ -23,7 +23,7 @@ from .losses import build_loss
 from .manifest import load_manifest, select
 from .metrics import evaluate_predictions, prob_columns
 from .models import apply_finetune, build_model, load_checkpoint, save_checkpoint, train_mode
-from .splits import assert_no_group_leakage, describe_fold, make_folds
+from .splits import apply_splits, assert_no_group_leakage, describe_fold, frozen_folds, load_splits_file, make_folds
 
 log = logging.getLogger("mycoscan")
 
@@ -141,23 +141,37 @@ def _resolve_classes(df: pd.DataFrame, cfg_classes: tuple[str, ...]) -> list[str
 def run_training(cfg: Config) -> Path:
     seed_everything(cfg.seed)
     device = resolve_device(cfg.device)
-    df = select(load_manifest(cfg.manifest), cfg.modality, cfg.source)
+    leaky = cfg.split == "image_random"
+    df = select(load_manifest(cfg.manifest, allow_ungrouped=leaky), cfg.modality, cfg.source)
+    if cfg.splits_file:
+        df = apply_splits(df, load_splits_file(cfg.splits_file, cfg.manifest))
+        held_out = df["pool"] == "B"
+        log.info("splits file %s: %d Pool B images held out of this run", cfg.splits_file, int(held_out.sum()))
+        df = df[~held_out].reset_index(drop=True)
     if df.empty:
         raise ValueError(f"no images for modality={cfg.modality} source={cfg.source} in {cfg.manifest}")
     classes = _resolve_classes(df, cfg.classes)
     run_dir = Path(cfg.output_dir) / cfg.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2), encoding="utf-8")
+    (run_dir / "config.json").write_text(json.dumps({**asdict(cfg), "leaky": leaky}, indent=2), encoding="utf-8")
     log.info("run %s: %d images, %d groups, %d classes, device=%s", cfg.run_name, len(df),
              df["group"].nunique(), len(classes), device)
+    if leaky:
+        log.warning("split=image_random is leaky, comparison only: images of one group land on both sides of a split")
     meta = {"modality": cfg.modality, "source": cfg.source, "finetune": cfg.finetune, "weights_init": cfg.weights,
             "plate_crop": cfg.plate_crop}
 
-    folds = make_folds(df, cfg.split, cfg.n_folds, cfg.val_fraction, cfg.seed)
+    if cfg.splits_file and cfg.split == "kfold":
+        folds = frozen_folds(df)
+        if len(folds) != cfg.n_folds:
+            raise ValueError(f"config n_folds={cfg.n_folds} but {cfg.splits_file} freezes {len(folds)} folds")
+    else:
+        folds = make_folds(df, cfg.split, cfg.n_folds, cfg.val_fraction, cfg.seed)
     fold_info, tables, histories = [], [], {}
     started = time.time()
     for k, fold in enumerate(folds):
-        assert_no_group_leakage(df, fold)
+        if not leaky:
+            assert_no_group_leakage(df, fold)
         info = describe_fold(df, fold, classes)
         fold_info.append(info)
         log.info("%s: %d/%d train/val images, %d/%d groups, val classes without groups: %s", fold.name,
@@ -172,13 +186,15 @@ def run_training(cfg: Config) -> Path:
         save_checkpoint(ckpt_path, model, cfg.arch, classes, cfg.image_size, cfg.autocontrast, {**meta, "fold": fold.name})
 
     metrics = write_report(run_dir, pd.concat(tables, ignore_index=True), classes, cfg.bootstrap, cfg.seed,
-                           {"split": cfg.split, "folds": fold_info, "train_history": histories,
-                            "note": "validation predictions are out-of-fold, real images only, groups disjoint from training"})
+                           {"split": cfg.split, "leaky": leaky, "folds": fold_info, "train_history": histories,
+                            "note": "LEAKY, comparison only: groups shared between training and validation" if leaky
+                            else "validation predictions are out-of-fold, real images only, groups disjoint from training"})
     if cfg.split != "holdout" and cfg.fit_final:
         log.info("final model on all %d groups", df["group"].nunique())
         model, _ = fit_model(df, cfg, classes, device, cfg.seed)
         save_checkpoint(run_dir / "model.pt", model, cfg.arch, classes, cfg.image_size, cfg.autocontrast, {**meta, "fold": "all"})
-    log.info("done in %.0fs. image acc=%.3f macro-F1=%.3f | isolate acc=%.3f macro-F1=%.3f -> %s", time.time() - started,
+    log.info("%sdone in %.0fs. image acc=%.3f macro-F1=%.3f | isolate acc=%.3f macro-F1=%.3f -> %s",
+             "[leaky, comparison only] " if leaky else "", time.time() - started,
              metrics["image_level"]["accuracy"], metrics["image_level"]["macro"]["f1"],
              metrics["isolate_level"]["accuracy"], metrics["isolate_level"]["macro"]["f1"], run_dir)
     return run_dir

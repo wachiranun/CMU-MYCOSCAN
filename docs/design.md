@@ -10,7 +10,17 @@ So the manifest loader derives one `group` column, which is the isolate for CMU 
 
 - The weighted sampler in `data.py` gives every class the same total weight, and every group within a class the same share. An isolate photographed 30 times does not outweigh one photographed 5 times.
 - The bootstrap confidence intervals in `metrics.py` resample groups, not images. Resampling images would treat 30 near-copies as 30 independent cases and make the intervals far too narrow. Groups are resampled within each species, so every replicate contains every class and the macro averages always cover the same classes.
-- A CMU row without an `isolate_id`, or an OpenFungi row without a `group_id`, fails at load time. A blank value would otherwise make the image its own group and let it land on the other side of a split from its sibling images. The loader has an explicit opt-out that loads ungrouped OpenFungi rows as one group per image; it is reserved for the deliberately leaky image-level split that a later ticket adds to reproduce the OpenFungi paper's number, and nothing in the training pipeline uses it.
+- A CMU row without an `isolate_id`, or an OpenFungi row without a `group_id`, fails at load time. A blank value would otherwise make the image its own group and let it land on the other side of a split from its sibling images. The loader has an explicit opt-out that loads ungrouped OpenFungi rows as one group per image. Only the deliberately leaky `image_random` split uses it (see below).
+
+## Pool A and Pool B: a partition made once
+
+Plan 2 scores its models on OpenFungi images that no model in either plan was trained on (Pool B). That only holds if the partition never changes, so `mycoscan partition` writes it once, to a splits file such as `splits_v1.csv`, and refuses to overwrite it. Every OpenFungi group goes to Pool A (development, 70%) or Pool B (external test, 30%). Within each class, groups are ordered by modality and Pool B takes evenly spaced ones, so every class gives up the same share and the colony and microscopic groups of a class are split in proportion. Pool A groups also get one of 5 folds for grouped cross-validation.
+
+The file records the SHA-256 of the manifest it was built from, and a sidecar (`splits_v1.csv.sha256`) records the file's own hash. A run that names the file in `splits_file` checks both before it starts. It refuses if the manifest has changed since the partition, because a changed manifest can move images between groups. It then merges each group's pool and fold into the manifest, drops Pool B, and with `split = "kfold"` uses the frozen folds. A second defence sits in the data loader: a training loader raises, naming the rows, if any Pool B (or sealed test) image reaches it. That guard catches a wrong config or a future code path that skips the merge.
+
+## The leaky split, kept for comparison
+
+The OpenFungi paper's 99.8% comes from a random image-level split, where near-duplicate shots of one plate sit on both sides. `split = "image_random"` reproduces it: stratified folds of images, ignoring groups, and the group leakage check is skipped. Its `metrics.json` and `config.json` carry `"leaky": true` and its log lines say "leaky, comparison only". It exists only so the pilot report can show the leaky number next to the grouped one.
 
 ## Why k-fold is the headline estimate and 80/20 is kept for the protocol
 

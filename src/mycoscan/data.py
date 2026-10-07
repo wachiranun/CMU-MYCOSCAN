@@ -46,9 +46,21 @@ def class_loss_weights(labels: np.ndarray, n_classes: int) -> torch.Tensor:
     return torch.tensor(weights, dtype=torch.float32)
 
 
+def refuse_held_out(df: pd.DataFrame) -> None:
+    """A training loader never sees an external-test image: Pool B, or a sealed test split."""
+    held_out = df["split"].eq("test") if "split" in df else pd.Series(False, index=df.index)
+    if "pool" in df:
+        held_out |= df["pool"].eq("B")
+    if held_out.any():
+        paths = df.loc[held_out, "image_path"].tolist()
+        raise ValueError(f"training loader refused {len(paths)} held-out rows (Pool B or test): {', '.join(paths[:10])}")
+
+
 def make_loader(df: pd.DataFrame, class_to_idx: dict[str, int], image_size: int, autocontrast: bool,
                 train: bool, batch_size: int, num_workers: int, imbalance: str = "none", seed: int = 0,
                 augmentation: str = "standard", plate_crop: bool = False) -> DataLoader:
+    if train:
+        refuse_held_out(df)
     labels = [class_to_idx[s] for s in df["species"]]
     crop = (df["modality"] == "colony").tolist() if plate_crop else None
     ds = ImageDataset(df["image_path"].tolist(), labels, build_transform(image_size, autocontrast, train, augmentation), crop)
