@@ -126,8 +126,10 @@ def write_report(run_dir: Path, preds: pd.DataFrame, classes: list[str], n_boot:
     preds.to_csv(run_dir / "predictions.csv", index=False)
     metrics = {**extra, **evaluate_predictions(preds, classes, n_boot, seed)}
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    flag = " (LEAKY, comparison only)" if extra.get("leaky") else ""
     for level in ("image_level", "isolate_level"):
-        plot_confusion(metrics[level]["confusion_matrix"], classes, run_dir / f"confusion_{level}.png", level.replace("_", " "))
+        plot_confusion(metrics[level]["confusion_matrix"], classes, run_dir / f"confusion_{level}.png",
+                       level.replace("_", " ") + flag)
     return metrics
 
 
@@ -163,7 +165,7 @@ def run_training(cfg: Config) -> Path:
     if leaky:
         log.warning("split=image_random is leaky, comparison only: images of one group land on both sides of a split")
     meta = {"modality": cfg.modality, "source": cfg.source, "finetune": cfg.finetune, "weights_init": cfg.weights,
-            "plate_crop": cfg.plate_crop}
+            "plate_crop": cfg.plate_crop, "leaky": leaky}
 
     if cfg.splits_file and cfg.split == "kfold":
         folds = frozen_folds(df)
@@ -189,7 +191,8 @@ def run_training(cfg: Config) -> Path:
         ckpt_path = run_dir / "model.pt" if cfg.split == "holdout" else run_dir / "folds" / f"{fold.name}.pt"
         save_checkpoint(ckpt_path, model, cfg.arch, classes, cfg.image_size, cfg.autocontrast, {**meta, "fold": fold.name})
 
-    metrics = write_report(run_dir, pd.concat(tables, ignore_index=True), classes, cfg.bootstrap, cfg.seed,
+    preds = pd.concat(tables, ignore_index=True).assign(leaky=leaky)
+    metrics = write_report(run_dir, preds, classes, cfg.bootstrap, cfg.seed,
                            {"split": cfg.split, "leaky": leaky, "provenance": provenance, "folds": fold_info,
                             "train_history": histories,
                             "note": "LEAKY, comparison only: groups shared between training and validation" if leaky

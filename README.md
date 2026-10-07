@@ -86,7 +86,7 @@ mycoscan train --config configs/cmu_microscopic.toml --set arch=convnext_tiny --
 
 | `weights` | meaning |
 |---|---|
-| `imagenet` | ImageNet-1k weights: timm's default tag for the arch. `densenet121` and `resnet50` keep the torchvision weights they always used. |
+| `imagenet` | weights trained on ImageNet-1k alone (timm's default tag when it is one), never a larger pretraining fine-tuned on 1k, so `imagenet` and `imagenet22k` stay separate arms. `densenet121` and `resnet50` keep the torchvision weights they always used. |
 | `imagenet22k` | ImageNet-22k (or 21k) pretraining, preferring the tag not fine-tuned on 1k, for example `convnext_tiny.fb_in22k` |
 | `dino` | self-supervised DINO weights: a DINO tag (`convnext_small.dinov3_lvd1689m`) or a DINO arch (`vit_small_patch14_dinov2`) |
 | `none` | random initialisation |

@@ -5,6 +5,7 @@ import re
 
 import pandas as pd
 import pytest
+import torch
 
 from mycoscan.cli import main
 from mycoscan.config import Config
@@ -101,8 +102,10 @@ def test_grouped_cv_inside_pool_a_validates_each_group_once_and_never_sees_pool_
 
 def test_image_random_split_is_marked_leaky_everywhere(synthetic_manifest, tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger="mycoscan"):
-        run_dir = run_training(_cfg(synthetic_manifest, tmp_path, split="image_random", n_folds=2))
+        run_dir = run_training(_cfg(synthetic_manifest, tmp_path, split="image_random", n_folds=2, fit_final=True))
     assert json.loads((run_dir / "metrics.json").read_text())["leaky"] is True
+    assert pd.read_csv(run_dir / "predictions.csv")["leaky"].all()
+    assert all(torch.load(p, weights_only=False)["leaky"] for p in [run_dir / "model.pt", *run_dir.glob("folds/*.pt")])
     assert json.loads((run_dir / "config.json").read_text())["leaky"] is True
     assert any("leaky, comparison only" in r.getMessage() for r in caplog.records)
 

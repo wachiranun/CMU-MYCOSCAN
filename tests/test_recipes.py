@@ -9,8 +9,10 @@ from PIL import Image, ImageDraw
 
 from mycoscan.config import Config
 from mycoscan.losses import build_loss
+from mycoscan.models import build_model, save_checkpoint
 from mycoscan.pipeline import run_training
-from mycoscan.transforms import IMAGENET_MEAN, IMAGENET_STD, build_transform, plate_circle_crop
+from mycoscan.predict import Predictor
+from mycoscan.transforms import IMAGENET_MEAN, IMAGENET_STD, build_transform, load_image, plate_circle_crop
 
 
 def _cfg(manifest, tmp_path, **kw):
@@ -97,6 +99,24 @@ def test_plate_circle_crop_centres_the_plate_and_removes_the_background():
     background = (np.abs(out - (60, 60, 70)).sum(axis=2) < 15)
     assert background.sum() < 0.01 * h * w
     assert out[0, 0].tolist() == [0, 0, 0]
+
+
+def test_plate_crop_applies_only_to_colony_images_and_only_when_configured():
+    plate = _plate()
+    assert load_image(plate, plate_crop=True, modality="colony").size != plate.size
+    assert load_image(plate, plate_crop=True, modality="microscopic").size == plate.size
+    assert load_image(plate, plate_crop=False, modality="colony").size == plate.size
+
+
+def test_predictor_crops_by_the_modality_of_each_image(tmp_path):
+    torch.manual_seed(0)
+    save_checkpoint(tmp_path / "m.pt", build_model("resnet18", 3, "none", 64), "resnet18", list("abc"), 64, True,
+                    {"modality": "all", "plate_crop": True})
+    predictor = Predictor(tmp_path / "m.pt")
+    plate = _plate()
+    cropped = plate_circle_crop(plate)
+    assert predictor.predict(plate, modality="colony") == predictor.predict(cropped, modality="microscopic")
+    assert predictor.predict(plate, modality="colony") != predictor.predict(plate, modality="microscopic")
 
 
 def test_plate_circle_crop_leaves_an_image_without_a_plate_alone():

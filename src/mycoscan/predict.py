@@ -3,6 +3,9 @@
     from mycoscan.predict import Predictor
     predictor = Predictor("runs/cmu_microscopic/model.pt")
     predictor.predict(pil_image_or_path)   # {"Talaromyces_marneffei": 0.91, ...}, highest first
+
+An image is taken to be of the checkpoint's modality unless `modality` says otherwise
+(needed only for a `modality = "all"` model trained with `plate_crop`).
 """
 from __future__ import annotations
 
@@ -12,7 +15,7 @@ import torch
 from PIL import Image
 
 from .models import load_checkpoint
-from .transforms import build_transform, plate_circle_crop, to_rgb
+from .transforms import build_transform, load_image
 
 
 class Predictor:
@@ -22,14 +25,11 @@ class Predictor:
         self.classes: list[str] = meta["classes"]
         self.modality: str = meta.get("modality", "")
         self.transform = build_transform(meta["image_size"], meta["autocontrast"], train=False)
-        self.plate_crop: bool = meta.get("plate_crop", False) and self.modality == "colony"
+        self.plate_crop: bool = meta.get("plate_crop", False)
 
     @torch.no_grad()
-    def predict(self, image: Image.Image | str | Path) -> dict[str, float]:
-        if not isinstance(image, Image.Image):
-            with Image.open(image) as img:
-                image = to_rgb(img)
-        image = to_rgb(image)
-        x = self.transform(plate_circle_crop(image) if self.plate_crop else image).unsqueeze(0).to(self.device)
+    def predict(self, image: Image.Image | str | Path, modality: str | None = None) -> dict[str, float]:
+        img = load_image(image, self.plate_crop, modality or self.modality)
+        x = self.transform(img).unsqueeze(0).to(self.device)
         probs = self.model(x).softmax(dim=1)[0].cpu().tolist()
         return dict(sorted(zip(self.classes, probs, strict=True), key=lambda kv: kv[1], reverse=True))

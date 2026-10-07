@@ -11,6 +11,7 @@ pigment of Talaromyces marneffei on the reverse of the colony).
 from __future__ import annotations
 
 import random
+from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
@@ -96,6 +97,17 @@ def plate_circle_crop(img: Image.Image, min_radius: float = 0.25) -> Image.Image
     mask = Image.new("L", crop.size, 0)
     ImageDraw.Draw(mask).ellipse([0, 0, crop.size[0] - 1, crop.size[1] - 1], fill=255)
     return Image.composite(crop, Image.new("RGB", crop.size), mask)
+
+
+def load_image(source: Image.Image | str | Path, plate_crop: bool, modality: str) -> Image.Image:
+    """8-bit RGB, cropped to the plate when plate_crop is on and the image is a colony photo.
+    Training, evaluation, Predictor and explain all load images here, so they crop alike."""
+    if isinstance(source, Image.Image):
+        rgb = to_rgb(source)
+    else:
+        with Image.open(source) as img:
+            rgb = to_rgb(img)
+    return plate_circle_crop(rgb) if plate_crop and modality == "colony" else rgb
 
 
 def build_transform(image_size: int, autocontrast: bool, train: bool, augmentation: str = "standard") -> T.Compose:

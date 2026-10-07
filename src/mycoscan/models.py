@@ -36,9 +36,12 @@ def adapter(model: nn.Module) -> Adapter:
     return Adapter(head=getattr(model, "pretrained_cfg")["classifier"], blocks=blocks, cam_layer=blocks[-1])
 
 
+LARGER_THAN_1K = ("in12k", "in21k", "in22k", "_ft_")
+
+
 def _tag_matches(weights: str, arch: str, tag: str) -> bool:
     if weights == "imagenet":
-        return "in1k" in tag
+        return "in1k" in tag and not any(marker in tag for marker in LARGER_THAN_1K)
     if weights == "imagenet22k":
         return "in22k" in tag or "in21k" in tag
     return "dino" in tag or "dino" in arch
@@ -48,8 +51,10 @@ def resolve_weights(arch: str, weights: str) -> str:
     """The timm `name.tag` that `weights` (imagenet | imagenet22k | dino) means for `arch`;
     `arch` itself for any other weights.
 
-    An arch that already names a tag keeps it. Otherwise imagenet prefers timm's default tag,
-    imagenet22k prefers the tag not fine-tuned on 1k, and dino takes a DINO tag or a DINO arch.
+    An arch that already names a tag keeps it. Otherwise imagenet takes a tag trained on ImageNet-1k
+    alone (timm's default if it is one), never one pretrained on a larger set and fine-tuned on 1k,
+    so imagenet and imagenet22k stay distinct; imagenet22k prefers the tag not fine-tuned on 1k;
+    dino takes a DINO tag or a DINO arch.
     """
     if not timm.is_model(arch):
         raise ValueError(f"config arch={arch!r} is not a timm model name")

@@ -42,6 +42,9 @@ def test_verified_backbone_builds_and_takes_a_training_step(arch):
 @pytest.mark.parametrize(("arch", "weights", "expected"), [
     ("densenet121", "imagenet", "densenet121.tv_in1k"),
     ("resnet50", "imagenet", "resnet50.tv2_in1k"),
+    ("convnext_tiny", "imagenet", "convnext_tiny.fb_in1k"),
+    ("tf_efficientnetv2_s", "imagenet", "tf_efficientnetv2_s.in1k"),
+    ("vit_base_patch16_224", "imagenet", "vit_base_patch16_224.augreg_in1k"),
     ("convnext_tiny", "imagenet22k", "convnext_tiny.fb_in22k"),
     ("vit_base_patch16_224", "imagenet22k", "vit_base_patch16_224.augreg_in21k"),
     ("convnext_small", "dino", "convnext_small.dinov3_lvd1689m"),
@@ -55,6 +58,8 @@ def test_weights_resolve_to_a_timm_pretrained_tag(arch, weights, expected):
 def test_weights_without_a_matching_tag_fail_at_config_time(tmp_path):
     with pytest.raises(ValueError, match="lvd142m"):
         Config(run_name="x", manifest="m.csv", arch="vit_small_patch14_dinov2", weights="imagenet")
+    with pytest.raises(ValueError, match="augreg_in21k_ft_in1k"):
+        Config(run_name="x", manifest="m.csv", arch="vit_tiny_patch16_224", weights="imagenet")
     with pytest.raises(ValueError, match="resnet50"):
         Config(run_name="x", manifest="m.csv", arch="resnet50", weights="dino")
     with pytest.raises(ValueError, match="not_a_model"):

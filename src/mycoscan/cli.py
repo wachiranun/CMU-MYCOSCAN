@@ -49,15 +49,15 @@ def _explain(args) -> None:
     from .explain import explain_images
     from .manifest import load_manifest
 
-    labels = None
+    labels = modalities = None
     images = args.images
     if args.manifest:
         df = load_manifest(args.manifest)
         if args.modality:
             df = df[df["modality"] == args.modality]
         df = df.groupby("species", group_keys=False).head(args.per_class)
-        images, labels = df["image_path"].tolist(), df["species"].tolist()
-    sheet = explain_images(args.checkpoint, images, args.out, args.device, labels)
+        images, labels, modalities = df["image_path"].tolist(), df["species"].tolist(), df["modality"].tolist()
+    sheet = explain_images(args.checkpoint, images, args.out, args.device, labels, modalities)
     print(f"{len(sheet)} panels and review_sheet.csv written to {args.out}")
 
 
