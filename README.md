@@ -110,10 +110,28 @@ Each run writes `runs/<run_name>/` with these files:
 |---|---|
 | `config.json` | the resolved config |
 | `predictions.csv` | one row per validation image, with out-of-fold probabilities for `kfold` and `loio` |
-| `metrics.json` | image-level and isolate-level metrics, per class and macro, 95% isolate-bootstrap CIs, fold composition, training curves |
+| `metrics.json` | image-level and isolate-level metrics, per class and macro, 95% isolate-bootstrap CIs, fold composition, training curves, and a `provenance` block |
 | `confusion_image_level.png`, `confusion_isolate_level.png` | confusion matrices |
 | `folds/<fold>.pt` | one checkpoint per fold (`kfold`, `loio`) |
 | `model.pt` | the deployable model. For `holdout` this is the model trained on 80% of isolates. For `kfold` and `loio` it is retrained on all isolates after cross-validation. |
+
+### Provenance and MLflow
+
+The `provenance` block in every `metrics.json`, from training or `mycoscan eval`, records what the numbers came from:
+
+- the git commit, and `dirty: true` if any file differed from it when the run started
+- the SHA-256 of the manifest, of the splits file when one is used, and of the checkpoint for an evaluation
+- the resolved config
+- the versions of Python and the key packages
+
+To log the same params, metrics and report files to MLflow as well, install the extra and set `tracking = "mlflow"`:
+
+```bash
+pip install -e ".[mlflow]"
+MLFLOW_TRACKING_URI=http://tracker:5000 mycoscan train --config configs/cmu_microscopic.toml --set tracking=mlflow
+```
+
+Without `MLFLOW_TRACKING_URI`, MLflow writes to `mlflow.db` in the working directory. Checkpoints are not uploaded. A run with `tracking = "mlflow"` but without MLflow installed fails before training and names the extra.
 
 ## Evaluate, explain, predict
 

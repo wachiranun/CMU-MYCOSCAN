@@ -14,6 +14,7 @@ CHOICES = {
     "imbalance": {"sampler", "none"},
     "loss": {"ce", "weighted_ce", "focal"},
     "augmentation": {"none", "standard", "trivial_wide"},
+    "tracking": {"none", "mlflow"},
     "split": {"holdout", "kfold", "loio", "image_random"},
 }
 
@@ -52,6 +53,7 @@ class Config:
     bootstrap: int = 1000
     amp: bool = False
     grad_clip: float = 0.0
+    tracking: str = "none"
 
     def __post_init__(self) -> None:
         if self.imbalance == "loss":

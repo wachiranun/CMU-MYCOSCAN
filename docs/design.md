@@ -71,6 +71,10 @@ For each class (one versus rest) and as a macro average over classes present in 
 
 Training runs a fixed number of epochs and does not pick the best epoch on validation. The validation fold is also the fold the reported score comes from, so picking an epoch on it would make that score optimistic, and with few validation isolates per class in interim runs the optimism would be large.
 
+## Provenance
+
+A number in the pilot or main-study report is only worth quoting if it can be traced to the exact code, data and settings that produced it. So every training and evaluation run writes a `provenance` block into `metrics.json`. The block holds the git commit and a dirty flag, the SHA-256 of the manifest (and of the splits file or checkpoint), the resolved config, and package versions. The git state is read when the run starts, so editing code during a long run does not change what is recorded. Untracked files count as dirty, because a new module can change what runs. `data/` and `runs/` are git-ignored, so they never do. MLflow logging is optional (`tracking = "mlflow"`), because the suite and the Colab, Kaggle and cluster environments must work without a tracking server. The file is always the record, and MLflow is a convenience view of it.
+
 ## Explainability
 
 `explain.py` computes Grad-CAM on the backbone's last feature tap (`features.norm5` for DenseNet-121, `layer4` for ResNet-50) and SmoothGrad saliency, which is the mean absolute input gradient over 25 noisy copies. Each image gets a three-panel PNG (original, Grad-CAM overlay, saliency) and a row in `review_sheet.csv` with blank columns for the expert's judgement. That sheet is the record for the protocol's concordance review (2.4). The reviewer checks whether the highlighted regions are conidiophores, hyphae, spores and colony texture, or artifacts such as plate edges, labels, scale bars and dust.

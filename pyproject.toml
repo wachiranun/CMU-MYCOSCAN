@@ -26,7 +26,7 @@ dev = [
     "ipykernel>=6.0.0",
 ]
 mlflow = [
-    "mlflow-skinny==3.16.1",
+    "mlflow==3.16.1",
 ]
 
 [project.scripts]

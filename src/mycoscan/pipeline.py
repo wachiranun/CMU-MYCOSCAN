@@ -23,6 +23,7 @@ from .losses import build_loss
 from .manifest import load_manifest, select
 from .metrics import evaluate_predictions, prob_columns
 from .models import apply_finetune, build_model, load_checkpoint, save_checkpoint, train_mode
+from .provenance import collect, log_to_mlflow, require_mlflow
 from .splits import apply_splits, assert_no_group_leakage, describe_fold, frozen_folds, load_splits_file, make_folds
 
 log = logging.getLogger("mycoscan")
@@ -139,6 +140,9 @@ def _resolve_classes(df: pd.DataFrame, cfg_classes: tuple[str, ...]) -> list[str
 
 
 def run_training(cfg: Config) -> Path:
+    if cfg.tracking == "mlflow":
+        require_mlflow()
+    provenance = collect(cfg.manifest, asdict(cfg), cfg.splits_file or None)
     seed_everything(cfg.seed)
     device = resolve_device(cfg.device)
     leaky = cfg.split == "image_random"
@@ -186,13 +190,16 @@ def run_training(cfg: Config) -> Path:
         save_checkpoint(ckpt_path, model, cfg.arch, classes, cfg.image_size, cfg.autocontrast, {**meta, "fold": fold.name})
 
     metrics = write_report(run_dir, pd.concat(tables, ignore_index=True), classes, cfg.bootstrap, cfg.seed,
-                           {"split": cfg.split, "leaky": leaky, "folds": fold_info, "train_history": histories,
+                           {"split": cfg.split, "leaky": leaky, "provenance": provenance, "folds": fold_info,
+                            "train_history": histories,
                             "note": "LEAKY, comparison only: groups shared between training and validation" if leaky
                             else "validation predictions are out-of-fold, real images only, groups disjoint from training"})
     if cfg.split != "holdout" and cfg.fit_final:
         log.info("final model on all %d groups", df["group"].nunique())
         model, _ = fit_model(df, cfg, classes, device, cfg.seed)
         save_checkpoint(run_dir / "model.pt", model, cfg.arch, classes, cfg.image_size, cfg.autocontrast, {**meta, "fold": "all"})
+    if cfg.tracking == "mlflow":
+        log_to_mlflow(run_dir, cfg.run_name, metrics)
     log.info("%sdone in %.0fs. image acc=%.3f macro-F1=%.3f | isolate acc=%.3f macro-F1=%.3f -> %s",
              "[leaky, comparison only] " if leaky else "", time.time() - started,
              metrics["image_level"]["accuracy"], metrics["image_level"]["macro"]["f1"],
@@ -213,4 +220,5 @@ def evaluate_checkpoint(checkpoint: str | Path, manifest: str | Path, out_dir: s
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     return write_report(out_dir, prediction_table(df, probs, classes, "eval"), classes, n_boot, seed,
-                        {"checkpoint": str(checkpoint), "manifest": str(manifest)})
+                        {"checkpoint": str(checkpoint), "manifest": str(manifest),
+                         "provenance": collect(manifest, checkpoint=checkpoint)})
