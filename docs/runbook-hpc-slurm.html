@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MycoScan on ERAWAN</title>
+<meta name="description" content="Run book for training CMU MycoScan on the CMU HPC ERAWAN cluster with Slurm: clone into /project, build the environment, move data, prefetch weights, submit and monitor jobs, bring results back.">
+<style>
+:root{
+  --bg:#f7f7f5; --surface:#ffffff; --surface-2:#eef0ee; --text:#1c1f1b; --muted:#5b625a;
+  --line:#d9ddd7; --accent:#2a6b4f; --accent-soft:#dcefe5; --warn:#8a5a00; --warn-soft:#fff2d6;
+  --danger:#9b2c2c; --danger-soft:#fde3e3; --code-bg:#1e2320; --code-text:#e8ece6; --code-comment:#8f9a90;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Noto Sans Thai",sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#131613; --surface:#1b1f1b; --surface-2:#242924; --text:#e6e9e3; --muted:#a3aba1;
+    --line:#333a33; --accent:#7fc9a6; --accent-soft:#1f3a2e; --warn:#f0c060; --warn-soft:#3a2f12;
+    --danger:#ff8a8a; --danger-soft:#3f1d1d; --code-bg:#0e110f; --code-text:#e8ece6; --code-comment:#7f8a80;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#131613; --surface:#1b1f1b; --surface-2:#242924; --text:#e6e9e3; --muted:#a3aba1;
+  --line:#333a33; --accent:#7fc9a6; --accent-soft:#1f3a2e; --warn:#f0c060; --warn-soft:#3a2f12;
+  --danger:#ff8a8a; --danger-soft:#3f1d1d; --code-bg:#0e110f; --code-text:#e8ece6; --code-comment:#7f8a80;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.55 var(--sans)}
+a{color:var(--accent)}
+.wrap{max-width:1180px;margin:0 auto;padding:0 16px}
+header.hero{border-bottom:1px solid var(--line);background:var(--surface)}
+header.hero .wrap{padding:28px 16px 22px}
+.eyebrow{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 6px}
+h1{font-size:30px;line-height:1.2;margin:0 0 10px}
+.lede{color:var(--muted);max-width:70ch;margin:0}
+.meta{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:14px;font-size:14px;color:var(--muted)}
+.layout{display:grid;grid-template-columns:1fr;gap:28px;padding:24px 0 80px}
+@media (min-width:960px){.layout{grid-template-columns:240px minmax(0,1fr)}}
+nav.toc{position:sticky;top:16px;align-self:start;font-size:14px;display:none}
+@media (min-width:960px){nav.toc{display:block}}
+nav.toc ol{list-style:none;margin:0;padding:0;border-left:2px solid var(--line)}
+nav.toc li a{display:block;padding:5px 12px;color:var(--muted);text-decoration:none;border-left:2px solid transparent;margin-left:-2px}
+nav.toc li a:hover,nav.toc li a.active{color:var(--text);border-left-color:var(--accent)}
+nav.toc .num{display:inline-block;width:1.6em;color:var(--accent);font-variant-numeric:tabular-nums}
+main{min-width:0}
+section{margin:0 0 40px}
+h2{font-size:22px;margin:0 0 12px;padding-top:8px;display:flex;gap:10px;align-items:baseline}
+h2 .num{color:var(--accent);font-variant-numeric:tabular-nums;font-size:18px}
+h3{font-size:17px;margin:22px 0 8px}
+p{margin:0 0 12px;max-width:78ch}
+ul,ol{margin:0 0 12px;padding-left:22px;max-width:78ch}
+li{margin:4px 0}
+code{font:0.92em var(--mono);background:var(--surface-2);padding:1px 5px;border-radius:4px}
+pre{position:relative;margin:0 0 14px;background:var(--code-bg);color:var(--code-text);border-radius:8px;padding:14px 16px;overflow:auto;font:13.5px/1.5 var(--mono)}
+pre code{background:none;padding:0;font:inherit;color:inherit}
+pre .c{color:var(--code-comment)}
+pre .copy{position:absolute;top:8px;right:8px;font:12px var(--sans);color:var(--code-text);background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);border-radius:6px;padding:3px 9px;cursor:pointer}
+pre .copy:hover{background:rgba(255,255,255,.16)}
+pre .file{display:block;font:12px var(--mono);color:var(--code-comment);margin:-6px 0 10px}
+table{border-collapse:collapse;width:100%;margin:0 0 14px;font-size:14.5px;background:var(--surface)}
+th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--surface-2);font-weight:600}
+td code{white-space:nowrap}
+.tbl{overflow-x:auto;margin:0 0 14px}
+.tbl table{margin:0}
+.note,.warn,.danger{border-left:4px solid;border-radius:6px;padding:10px 14px;margin:0 0 14px;max-width:78ch}
+.note{background:var(--accent-soft);border-color:var(--accent)}
+.warn{background:var(--warn-soft);border-color:var(--warn)}
+.danger{background:var(--danger-soft);border-color:var(--danger)}
+.note p,.warn p,.danger p{margin:0}
+.note strong,.warn strong,.danger strong{display:block;margin-bottom:2px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:0 0 16px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-size:14.5px}
+.card b{display:block;font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:4px}
+.card code{font-size:.9em}
+.check{list-style:none;padding:0}
+.check li{display:flex;gap:10px;align-items:flex-start;padding:6px 0;border-bottom:1px dashed var(--line)}
+.check input{margin-top:5px;accent-color:var(--accent)}
+.steps{counter-reset:step;list-style:none;padding:0}
+.steps>li{counter-increment:step;position:relative;padding-left:34px;margin:0 0 10px}
+.steps>li::before{content:counter(step);position:absolute;left:0;top:1px;width:24px;height:24px;border-radius:50%;background:var(--accent);color:#fff;font-size:13px;font-weight:600;display:grid;place-items:center}
+.theme-btn{font:13px var(--sans);color:var(--muted);background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer}
+footer{border-top:1px solid var(--line);color:var(--muted);font-size:13px;padding:18px 0 40px}
+@media print{nav.toc,.copy,.theme-btn{display:none !important} pre{white-space:pre-wrap} body{font-size:12px}}
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">CMU MycoScan · Component 2 · Run book</p>
+    <h1>Training MycoScan on CMU HPC ERAWAN with Slurm</h1>
+    <p class="lede">From an empty <code>/project/wachiranun.sir/</code> to finished runs: clone the repository, build the Python environment, move the images, prefetch pretrained weights, submit GPU jobs, watch them, and copy the results back.</p>
+    <div class="meta">
+      <span>Cluster: <strong>ERAWAN</strong>, erawan.cmu.ac.th</span>
+      <span>Scheduler: Slurm</span>
+      <span>Repo: wachiranun/CMU-MYCOSCAN</span>
+      <span>Written 2026-10-08</span>
+      <button class="theme-btn" id="themeBtn" type="button">Toggle theme</button>
+    </div>
+  </div>
+</header>
+
+<div class="wrap layout">
+<nav class="toc" aria-label="Contents">
+  <ol>
+    <li><a href="#glance"><span class="num">0</span>ERAWAN at a glance</a></li>
+    <li><a href="#prereq"><span class="num">1</span>Before you log in</a></li>
+    <li><a href="#login"><span class="num">2</span>Log in and lay out /project</a></li>
+    <li><a href="#clone"><span class="num">3</span>Clone the repository</a></li>
+    <li><a href="#env"><span class="num">4</span>Python environment</a></li>
+    <li><a href="#data"><span class="num">5</span>Move the data</a></li>
+    <li><a href="#weights"><span class="num">6</span>Prefetch pretrained weights</a></li>
+    <li><a href="#smoke"><span class="num">7</span>Smoke-test job</a></li>
+    <li><a href="#template"><span class="num">8</span>Training job template</a></li>
+    <li><a href="#plan1"><span class="num">9</span>Plan 1: OpenFungi pilot</a></li>
+    <li><a href="#plan2"><span class="num">10</span>Plan 2: CMU main study</a></li>
+    <li><a href="#monitor"><span class="num">11</span>Monitor jobs</a></li>
+    <li><a href="#results"><span class="num">12</span>Bring results back</a></li>
+    <li><a href="#trouble"><span class="num">13</span>Troubleshooting</a></li>
+    <li><a href="#checklist"><span class="num">14</span>Checklist</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="glance">
+  <h2><span class="num">0</span>ERAWAN at a glance</h2>
+  <p>Facts taken from the ERAWAN wiki on 2026-10-08. Verify the live numbers with <code>sinfo</code> and <code>scontrol show partition gpu</code> once logged in, since limits change.</p>
+  <div class="cards">
+    <div class="card"><b>Login</b><code>ssh wachiranun.sir@cmu.ac.th@erawan.cmu.ac.th</code><br>CMU network or CMU VPN only. Password is the CMU account password.</div>
+    <div class="card"><b>Storage</b><code>/home</code> 1 TB archive disk, slow.<br><code>/project</code> 200 GB per user, NVMe parallel file system, fast. Work here.</div>
+    <div class="card"><b>Internet</b>Login node has internet. <strong>Compute nodes do not.</strong> Every download (pip, timm weights) happens on the login node.</div>
+    <div class="card"><b>Default partition</b><code>gpu</code> is the default if none is given. Partition names are lower-case in Slurm: <code>cpu</code>, <code>gpu</code>, <code>mixed</code>, <code>gpu-h100</code>.</div>
+  </div>
+  <div class="tbl"><table>
+    <thead><tr><th>Partition</th><th>Hardware</th><th>Time limit</th><th>Max CPU per job</th><th>Running jobs per user</th><th>Queued jobs per user</th><th>Use it for</th></tr></thead>
+    <tbody>
+      <tr><td><code>gpu</code></td><td>2 nodes, 16 × NVIDIA A100 80 GB, 64 CPUs</td><td>168 h</td><td>4</td><td>2</td><td>3</td><td>All training and evaluation. One A100 per job is plenty for this code.</td></tr>
+      <tr><td><code>gpu-h100</code></td><td>1 node, 4 × H100 80 GB, 128 CPUs</td><td>120 h</td><td>64</td><td>1</td><td>2</td><td>Sweeps or multi-seed runs that want many data-loader workers.</td></tr>
+      <tr><td><code>mixed</code></td><td>1 node, 8 × A100, 128 CPUs</td><td>24 h</td><td>64</td><td>1</td><td>2</td><td>Short GPU jobs that need more than 4 CPUs.</td></tr>
+      <tr><td><code>cpu</code></td><td>2 nodes, 192 CPUs</td><td>168 h</td><td>32</td><td>2</td><td>3</td><td><code>pytest</code>, results tables, learning curves, paired comparisons.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="warn"><p><strong>Two jobs at a time</strong>The <code>gpu</code> partition runs at most 2 of your jobs and queues at most 3. Chain stages inside one job or with <code>--dependency</code> rather than submitting many small jobs. Section 9 shows both.</p></div>
+  <p>Useful ERAWAN-specific commands: <code>myquota</code> (disk use), <code>mycredit</code> (credit balance in Baht), <code>htopc1</code> to <code>htopc4</code> and <code>nvtopc1</code> to <code>nvtopc4</code> (live CPU and GPU use on compute node 1 to 4).</p>
+</section>
+
+<section id="prereq">
+  <h2><span class="num">1</span>Before you log in</h2>
+  <ol class="steps">
+    <li><strong>ERAWAN account and VPN.</strong> You need an active ERAWAN registration and either the CMU network or the CMU VPN. Check <code>mycredit</code> after the first login; training costs credit.</li>
+    <li><strong>Push the branch you want to run.</strong> The cluster clones from GitHub, so the code must be on <code>origin</code>. On 2026-10-08 the full pipeline lives on <code>ticket-13-metric-block</code>, which is 4 commits ahead of its remote copy, and <code>origin/main</code> still holds only the initial scaffold. From your laptop:
+<pre><button class="copy" type="button">Copy</button><code>git push origin ticket-13-metric-block</code></pre>
+    Once the branch is merged, replace <code>ticket-13-metric-block</code> with <code>main</code> everywhere below.</li>
+    <li><strong>Know what data goes up.</strong> <code>openfungi/</code> (about 7.9 GB), <code>data/</code> and <code>runs/</code> are git-ignored. They never come with the clone and must be copied separately (section 5).</li>
+    <li><strong>GitHub access from the cluster.</strong> The repository is public, so an HTTPS clone needs no token. For pushing results or configs back from ERAWAN, create a fine-grained personal access token or add an SSH key there; neither is needed to follow this run book.</li>
+  </ol>
+</section>
+
+<section id="login">
+  <h2><span class="num">2</span>Log in and lay out /project</h2>
+  <p>From PowerShell or any terminal on your laptop:</p>
+<pre><button class="copy" type="button">Copy</button><code>ssh wachiranun.sir@cmu.ac.th@erawan.cmu.ac.th</code></pre>
+  <p>Type <code>yes</code> at the fingerprint prompt the first time. Everything below runs on the ERAWAN login node unless it says otherwise.</p>
+  <p>Create one project root and keep repository, data caches, job scripts and logs under it. The repository expects <code>openfungi/</code> and <code>data/</code> at its own root, so those live inside the clone.</p>
+<pre><button class="copy" type="button">Copy</button><code>export PROJ=/project/wachiranun.sir/mycoscan
+mkdir -p "$PROJ"/{cache/huggingface,cache/torch,jobs,logs}
+cd "$PROJ" &amp;&amp; pwd &amp;&amp; myquota</code></pre>
+  <p>Target layout after sections 3 to 5:</p>
+<pre><code>/project/wachiranun.sir/mycoscan/
+├── env.sh                 <span class="c"># sourced by every job: conda env, cache paths</span>
+├── jobs/                  <span class="c"># *.sbatch scripts from this run book</span>
+├── logs/                  <span class="c"># Slurm stdout/stderr, one pair per job</span>
+├── cache/huggingface/     <span class="c"># timm / Hugging Face weights, prefetched on the login node</span>
+├── cache/torch/           <span class="c"># torchvision weights (densenet121, resnet50)</span>
+└── CMU-MYCOSCAN/          <span class="c"># git clone</span>
+    ├── configs/  src/  tests/
+    ├── openfungi/macro/&lt;class&gt;/  openfungi/micro/&lt;class&gt;/   <span class="c"># copied, not cloned</span>
+    ├── data/openfungi/manifest.csv, splits_v1.csv            <span class="c"># built here or copied</span>
+    ├── data/cmu/manifest.csv, splits_cmu.csv                 <span class="c"># Plan 2</span>
+    └── runs/&lt;run_name&gt;/                                      <span class="c"># outputs</span></code></pre>
+</section>
+
+<section id="clone">
+  <h2><span class="num">3</span>Clone the repository</h2>
+<pre><button class="copy" type="button">Copy</button><code>cd /project/wachiranun.sir/mycoscan
+git clone --branch ticket-13-metric-block https://github.com/wachiranun/CMU-MYCOSCAN.git
+cd CMU-MYCOSCAN
+git log --oneline -3          <span class="c"># expect 5f2a407 "Bag panels in explain for attention-MIL..." at the top</span></code></pre>
+  <p>Later updates:</p>
+<pre><button class="copy" type="button">Copy</button><code>cd /project/wachiranun.sir/mycoscan/CMU-MYCOSCAN &amp;&amp; git pull --ff-only</code></pre>
+  <div class="note"><p><strong>Provenance</strong>Every <code>metrics.json</code> records the git commit and whether the tree was dirty. Keep the clone clean: put experiment overrides in <code>--set</code> flags or in new config files that you commit, not in uncommitted edits.</p></div>
+</section>
+
+<section id="env">
+  <h2><span class="num">4</span>Python environment</h2>
+  <p>ERAWAN's default <code>python</code> is 3.6.8 and its system PyTorch is 1.10; MycoScan needs Python 3.11 or later and <code>torch==2.14.1</code>. Build an isolated conda environment with the <code>anaconda3</code> module. Do this on the login node, which has internet.</p>
+  <h3>4.1 Create the conda environment (once)</h3>
+<pre><button class="copy" type="button">Copy</button><code>module purge
+module load anaconda3
+conda config --set auto_activate_base false    <span class="c"># ERAWAN recommends this; run once</span>
+conda init bash                                 <span class="c"># once, then log out and back in</span>
+exit</code></pre>
+<pre><button class="copy" type="button">Copy</button><code>ssh wachiranun.sir@cmu.ac.th@erawan.cmu.ac.th
+module load anaconda3
+conda create -y -n mycoscan python=3.11
+conda activate mycoscan
+python --version                                <span class="c"># Python 3.11.x</span></code></pre>
+  <h3>4.2 Install MycoScan with CUDA wheels</h3>
+  <p>The A100 and H100 nodes run a CUDA 12 driver, so use the <code>cu126</code> PyTorch index exactly as the README does. The wheels bundle their own CUDA runtime; you do not need <code>module load cuda</code>.</p>
+<pre><button class="copy" type="button">Copy</button><code>cd /project/wachiranun.sir/mycoscan/CMU-MYCOSCAN
+pip install --upgrade pip
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu126
+pip install -e .
+pip install -e ".[lora]"       <span class="c"># optional: peft, only for finetune = "lora"</span>
+pip install -e ".[mlflow]"     <span class="c"># optional: only if you set tracking = "mlflow"</span>
+mycoscan env                   <span class="c"># on the login node this prints cuda_available: false; that is expected</span></code></pre>
+  <h3>4.3 Write env.sh, sourced by every job</h3>
+  <p>Cache directories go on <code>/project</code> so compute nodes read weights from the fast file system. <code>HF_HUB_OFFLINE</code> is set in the job scripts, not here, so the prefetch in section 6 can still download.</p>
+<pre><button class="copy" type="button">Copy</button><span class="file">/project/wachiranun.sir/mycoscan/env.sh</span><code>cat &gt; /project/wachiranun.sir/mycoscan/env.sh &lt;&lt;'EOF'
+# Shared environment for MycoScan on ERAWAN. Source from the login node and from every sbatch script.
+export PROJ=/project/wachiranun.sir/mycoscan
+export REPO="$PROJ/CMU-MYCOSCAN"
+export HF_HOME="$PROJ/cache/huggingface"
+export TORCH_HOME="$PROJ/cache/torch"
+export MPLBACKEND=Agg                  # headless matplotlib for confusion and reliability plots
+export PYTHONUNBUFFERED=1              # log lines reach the .out file as they happen
+
+module purge
+module load anaconda3
+# conda's shell hook; works whether or not ~/.bashrc was initialised
+eval "$(conda shell.bash hook)"
+conda activate mycoscan
+EOF
+source /project/wachiranun.sir/mycoscan/env.sh &amp;&amp; which mycoscan</code></pre>
+</section>
+
+<section id="data">
+  <h2><span class="num">5</span>Move the data</h2>
+  <p>The clone has no images. Copy <code>openfungi/</code> (and, for Plan 2, <code>data/cmu/</code>) from your laptop into the clone on <code>/project</code>. Thousands of small files transfer slowly over the VPN, so pack them first.</p>
+  <h3>5.1 Pack on the laptop (PowerShell)</h3>
+<pre><button class="copy" type="button">Copy</button><code>cd C:\Users\USER\OneDrive\Documents\GitHub\CMU-MYCOSCAN
+tar -cf openfungi.tar openfungi            <span class="c"># about 7.9 GB; images are already compressed, so no gzip</span>
+Get-FileHash openfungi.tar -Algorithm SHA256 | Format-List</code></pre>
+  <h3>5.2 Upload with scp (or WinSCP)</h3>
+<pre><button class="copy" type="button">Copy</button><code>scp openfungi.tar "wachiranun.sir@cmu.ac.th@erawan.cmu.ac.th:/project/wachiranun.sir/mycoscan/"</code></pre>
+  <p>WinSCP works too: host <code>erawan.cmu.ac.th</code>, port 22, CMU account, drag the tar into <code>/project/wachiranun.sir/mycoscan/</code>.</p>
+  <h3>5.3 Unpack on ERAWAN and verify</h3>
+<pre><button class="copy" type="button">Copy</button><code>cd /project/wachiranun.sir/mycoscan
+sha256sum openfungi.tar                     <span class="c"># compare with the laptop hash</span>
+tar -xf openfungi.tar -C CMU-MYCOSCAN &amp;&amp; rm openfungi.tar
+ls CMU-MYCOSCAN/openfungi/macro CMU-MYCOSCAN/openfungi/micro
+find CMU-MYCOSCAN/openfungi -type f | wc -l
+myquota</code></pre>
+  <h3>5.4 Manifests and splits</h3>
+  <p>Two choices. Either copy an existing <code>data/openfungi/manifest.csv</code>, <code>splits_v1.csv</code> and its <code>.sha256</code> sidecar from the laptop (image paths in the manifest are relative to the manifest's folder, so they stay valid), or build them on ERAWAN in section 9.1. Build on ERAWAN unless you already froze a partition: the splits file is pinned to the manifest's hash and must never be regenerated once runs depend on it.</p>
+  <div class="danger"><p><strong>Plan 2 data</strong>CMU isolate images and <code>data/cmu/splits_cmu.csv</code> are study data. Copy them only into <code>/project/wachiranun.sir/</code>, which is private to you, and keep the sealed test split's sidecar with it. <code>mycoscan seal</code> is run by someone other than the modeller.</p></div>
+</section>
+
+<section id="weights">
+  <h2><span class="num">6</span>Prefetch pretrained weights on the login node</h2>
+  <p>Compute nodes cannot reach the internet, so a training job that needs ImageNet, ImageNet-22k or DINO weights it has never seen will fail. Download every backbone you plan to use once, on the login node, into the caches that <code>env.sh</code> points at. The snippet builds each model the same way training does, so the resolved timm tag is identical.</p>
+<pre><button class="copy" type="button">Copy</button><code>source /project/wachiranun.sir/mycoscan/env.sh
+cd "$REPO"
+python - &lt;&lt;'EOF'
+from mycoscan.models import build_model
+wanted = [
+    ("densenet121", "imagenet"),              # configs/openfungi_pretrain.toml, cmu_*.toml
+    ("convnext_tiny", "imagenet"),            # openfungi_macro_well_supported, openfungi_stage1_micro
+    ("convnext_tiny", "imagenet22k"),
+    ("convnext_small", "imagenet"),
+    ("tf_efficientnetv2_s", "imagenet"),
+    ("resnet50", "imagenet"),
+    ("vit_small_patch14_dinov2", "dino"),     # also the OpenFungi pseudo-group embedder
+    ("vit_small_patch16_dinov3", "dino"),
+    ("convnext_small.dinov3_lvd1689m", "dino"),
+    ("vit_base_patch16_224", "imagenet"),
+]
+for arch, weights in wanted:
+    build_model(arch, 1, weights, 224)
+    print("cached", arch, weights)
+EOF
+du -sh "$HF_HOME" "$TORCH_HOME"</code></pre>
+  <p>Add a line to <code>wanted</code> whenever a new <code>arch</code> or <code>weights</code> enters a config. A job that hits a missing weight stops early with a Hugging Face "offline mode" error, so you lose only queue time.</p>
+</section>
+
+<section id="smoke">
+  <h2><span class="num">7</span>Smoke-test job</h2>
+  <p>Ten minutes on one A100: confirms the environment sees the GPU, the caches are readable offline, and a tiny synthetic run writes the usual outputs. Submit this before anything that costs real time.</p>
+<pre><button class="copy" type="button">Copy</button><span class="file">/project/wachiranun.sir/mycoscan/jobs/00_smoke.sbatch</span><code>cat &gt; /project/wachiranun.sir/mycoscan/jobs/00_smoke.sbatch &lt;&lt;'EOF'
+#!/bin/bash
+#SBATCH --job-name=myco-smoke
+#SBATCH --partition=gpu
+#SBATCH --gpus=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
+#SBATCH --time=00:15:00
+#SBATCH --output=/project/wachiranun.sir/mycoscan/logs/%x_%j.out
+#SBATCH --error=/project/wachiranun.sir/mycoscan/logs/%x_%j.err
+set -euo pipefail
+source /project/wachiranun.sir/mycoscan/env.sh
+export HF_HUB_OFFLINE=1
+cd "$REPO"
+nvidia-smi
+mycoscan env                              # expect cuda_available: true, device: NVIDIA A100 80GB
+mycoscan make-synthetic --out data/synthetic
+mycoscan train --config configs/synthetic/openfungi_pretrain.toml --set num_workers=$SLURM_CPUS_PER_TASK
+ls runs
+EOF
+sbatch /project/wachiranun.sir/mycoscan/jobs/00_smoke.sbatch</code></pre>
+<pre><button class="copy" type="button">Copy</button><code>squeue -u "$USER"                                   <span class="c"># ST = PD pending, R running</span>
+tail -f /project/wachiranun.sir/mycoscan/logs/myco-smoke_*.out   <span class="c"># Ctrl-C to stop following</span></code></pre>
+  <p>Pass criteria: <code>cuda_available</code> is true, the run finishes with a <code>metrics.json</code> under <code>runs/</code>, and <code>sacct -j &lt;jobid&gt; --format=JobID,State,Elapsed,MaxRSS</code> shows <code>COMPLETED</code>. Metrics on synthetic shapes mean nothing; only the plumbing is being tested.</p>
+</section>
+
+<section id="template">
+  <h2><span class="num">8</span>Training job template</h2>
+  <p>One generic script runs any <code>mycoscan</code> subcommand. The config and extra flags come from the <code>sbatch</code> command line, so the script is never edited per experiment and the job name says what ran.</p>
+<pre><button class="copy" type="button">Copy</button><span class="file">/project/wachiranun.sir/mycoscan/jobs/train.sbatch</span><code>cat &gt; /project/wachiranun.sir/mycoscan/jobs/train.sbatch &lt;&lt;'EOF'
+#!/bin/bash
+#SBATCH --partition=gpu
+#SBATCH --gpus=1
+#SBATCH --cpus-per-task=4            # gpu partition allows at most 4; feeds num_workers below
+#SBATCH --mem=64G
+#SBATCH --time=24:00:00              # raise for multi-seed CV and sweeps; partition cap is 168 h
+#SBATCH --output=/project/wachiranun.sir/mycoscan/logs/%x_%j.out
+#SBATCH --error=/project/wachiranun.sir/mycoscan/logs/%x_%j.err
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=wachiranun.sir@cmu.ac.th
+# Usage: sbatch --job-name=&lt;name&gt; train.sbatch &lt;config.toml&gt; [--set key=value ...]
+set -euo pipefail
+source /project/wachiranun.sir/mycoscan/env.sh
+export HF_HUB_OFFLINE=1              # compute nodes are offline; weights come from the prefetched cache
+cd "$REPO"
+CONFIG="$1"; shift
+echo "job $SLURM_JOB_ID on $(hostname), config $CONFIG, commit $(git rev-parse --short HEAD), extra: $*"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+mycoscan env
+mycoscan train --config "$CONFIG" \
+    --set num_workers="$SLURM_CPUS_PER_TASK" \
+    --set amp=true \
+    "$@"
+EOF</code></pre>
+  <h3>8.1 Submit</h3>
+<pre><button class="copy" type="button">Copy</button><code>cd /project/wachiranun.sir/mycoscan
+sbatch --job-name=of-pretrain jobs/train.sbatch configs/openfungi_pretrain.toml
+sbatch --job-name=of-macro-ws --time=48:00:00 jobs/train.sbatch configs/openfungi_macro_well_supported.toml
+sbatch --job-name=of-macro-ws-22k jobs/train.sbatch configs/openfungi_macro_well_supported.toml \
+    --set weights=imagenet22k --set run_name=openfungi_macro_ws_in22k</code></pre>
+  <p>Flags on the <code>sbatch</code> line override the <code>#SBATCH</code> lines in the file, so <code>--time</code>, <code>--partition</code> and <code>--job-name</code> can change per submission. Flags after the config path go to <code>mycoscan train</code> unchanged.</p>
+  <h3>8.2 What the directives mean here</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Directive</th><th>Why this value</th></tr></thead>
+    <tbody>
+      <tr><td><code>--gpus=1</code></td><td>ERAWAN's documented GPU request. The code trains on one device; more GPUs are not used.</td></tr>
+      <tr><td><code>--cpus-per-task=4</code></td><td>The <code>gpu</code> partition's per-job maximum. Passed on as <code>num_workers</code>, which the config defaults to 0 (main-process loading, slow on JPEG decoding).</td></tr>
+      <tr><td><code>--mem=64G</code></td><td>Nodes have about 2 TB; 64 GB covers image decoding, bootstrap CIs and the attention-MIL padded bags. Raise if <code>sacct</code> shows <code>OUT_OF_MEMORY</code>.</td></tr>
+      <tr><td><code>--time</code></td><td>A run killed at the limit leaves no resumable state. Overestimate. Slurm uses the value for backfill priority, so stay realistic.</td></tr>
+      <tr><td><code>--set amp=true</code></td><td>Mixed precision on the A100 roughly halves step time. Drop it for the P0 <code>small_cnn</code> reproduction if you want bit-for-bit comparability with CPU runs.</td></tr>
+      <tr><td><code>--output=.../%x_%j.out</code></td><td>Job name and ID in the log name, in a folder outside the clone so logs never show up as a dirty tree.</td></tr>
+    </tbody>
+  </table></div>
+  <h3>8.3 CPU-only companion</h3>
+  <p>Tests and the post-processing commands do not need a GPU. ERAWAN asks that nothing heavy run on the login node, so send <code>pytest</code> to the <code>cpu</code> partition. Light commands such as <code>mycoscan results</code> and <code>mycoscan paired</code> are fine on the login node.</p>
+<pre><button class="copy" type="button">Copy</button><span class="file">/project/wachiranun.sir/mycoscan/jobs/cpu.sbatch</span><code>cat &gt; /project/wachiranun.sir/mycoscan/jobs/cpu.sbatch &lt;&lt;'EOF'
+#!/bin/bash
+#SBATCH --partition=cpu
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=02:00:00
+#SBATCH --output=/project/wachiranun.sir/mycoscan/logs/%x_%j.out
+#SBATCH --error=/project/wachiranun.sir/mycoscan/logs/%x_%j.err
+# Usage: sbatch --job-name=&lt;name&gt; cpu.sbatch &lt;command ...&gt;
+set -euo pipefail
+source /project/wachiranun.sir/mycoscan/env.sh
+export HF_HUB_OFFLINE=1 OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
+cd "$REPO"
+"$@"
+EOF
+sbatch --job-name=pytest jobs/cpu.sbatch pytest -q
+sbatch --job-name=pytest-net jobs/cpu.sbatch pytest -q -m network    <span class="c"># needs every weight it uses prefetched</span></code></pre>
+</section>
+
+<section id="plan1">
+  <h2><span class="num">9</span>Plan 1: OpenFungi pilot, stage by stage</h2>
+  <p>The experiments P0 to P10 from the October 2026 plan, in the order the data dependencies force. Every stage below assumes the image folders from section 5 and the caches from section 6.</p>
+  <h3>9.1 Build the manifest and freeze Pool A / Pool B</h3>
+  <p>The manifest builder embeds every image with DINO to form pseudo-groups, so it runs as a GPU job. The partition step is cheap and deterministic, so it runs on the login node right after. The <code>cpu.sbatch</code> wrapper from section 8.3 runs any command; flags on the <code>sbatch</code> line override its <code>#SBATCH</code> partition, so the same wrapper serves GPU one-offs.</p>
+<pre><button class="copy" type="button">Copy</button><code>cd /project/wachiranun.sir/mycoscan
+jid=$(sbatch --parsable --job-name=of-manifest --partition=gpu --gpus=1 --cpus-per-task=4 --mem=32G --time=03:00:00 \
+      jobs/cpu.sbatch mycoscan build-openfungi --root openfungi --out data/openfungi/manifest.csv \
+      --config configs/openfungi_manifest.toml)
+echo "manifest job $jid"</code></pre>
+  <p>When it completes, look at the printed per-class summary in the log and skim <code>data/openfungi/contact_sheets/</code> (copy a few PNGs to the laptop with scp). Then freeze the partition once and never again:</p>
+<pre><button class="copy" type="button">Copy</button><code>source /project/wachiranun.sir/mycoscan/env.sh &amp;&amp; cd "$REPO"
+mycoscan partition --manifest data/openfungi/manifest.csv --out data/openfungi/splits_v1.csv
+cat data/openfungi/splits_v1.csv.sha256
+cp data/openfungi/splits_v1.csv data/openfungi/splits_v1.csv.sha256 "$PROJ"/     <span class="c"># a second copy outside the clone</span></code></pre>
+  <h3>9.2 P0: leaky versus grouped, then the stage-1 pretrain</h3>
+  <p>Three jobs. With the 2-running, 3-queued limit of the <code>gpu</code> partition this fits in one submission round.</p>
+<pre><button class="copy" type="button">Copy</button><code>cd /project/wachiranun.sir/mycoscan
+sbatch --job-name=p0-leaky   --time=06:00:00 jobs/train.sbatch configs/p0_small_cnn_micro_leaky.toml
+sbatch --job-name=p0-grouped --time=06:00:00 jobs/train.sbatch configs/p0_small_cnn_micro_grouped.toml
+sbatch --job-name=of-pretrain --time=12:00:00 jobs/train.sbatch configs/openfungi_pretrain.toml</code></pre>
+  <h3>9.3 Backbone and recipe comparisons (P1 to P5) with dependency chains</h3>
+  <p>Use <code>--dependency=afterok</code> so a later job starts only when an earlier one succeeded, while staying inside the queued-job limit. <code>--parsable</code> makes <code>sbatch</code> print just the job ID.</p>
+<pre><button class="copy" type="button">Copy</button><code>cd /project/wachiranun.sir/mycoscan
+CFG=configs/openfungi_macro_well_supported.toml
+j1=$(sbatch --parsable --job-name=ws-convnext-in1k --time=48:00:00 jobs/train.sbatch $CFG)
+j2=$(sbatch --parsable --job-name=ws-convnext-in22k --time=48:00:00 jobs/train.sbatch $CFG \
+       --set weights=imagenet22k --set run_name=openfungi_macro_ws_convnext_in22k)
+j3=$(sbatch --parsable --dependency=afterok:$j1 --job-name=ws-effnet --time=48:00:00 jobs/train.sbatch $CFG \
+       --set arch=tf_efficientnetv2_s --set run_name=openfungi_macro_ws_effnetv2s)
+j4=$(sbatch --parsable --dependency=afterok:$j2 --job-name=ws-dinov2-probe --time=12:00:00 jobs/train.sbatch $CFG \
+       --set arch=vit_small_patch14_dinov2 --set weights=dino --set finetune=linear_probe \
+       --set seeds=[0] --set run_name=openfungi_macro_ws_dinov2_probe)
+echo "$j1 $j2 $j3 $j4"; squeue -u "$USER" -o "%.9i %.14j %.3t %.10M %.20R"</code></pre>
+  <div class="note"><p><strong>Why afterok and not afterany</strong>A failed run should hold back the runs that will later be compared against it; <code>afterany</code> would start them regardless and burn credit. A job whose dependency failed stays pending with reason <code>DependencyNeverSatisfied</code>; cancel it with <code>scancel</code>.</p></div>
+  <h3>9.4 P7 learning curve as one job</h3>
+  <p><code>mycoscan sweep</code> runs its cells one after another in a single process, so the whole sweep is one Slurm job. Give it the sum of the cells' times. Four cells of 3-seed 5-fold ConvNeXt-Tiny fit comfortably in 72 hours on an A100.</p>
+<pre><button class="copy" type="button">Copy</button><span class="file">/project/wachiranun.sir/mycoscan/jobs/sweep.sbatch</span><code>cat &gt; /project/wachiranun.sir/mycoscan/jobs/sweep.sbatch &lt;&lt;'EOF'
+#!/bin/bash
+#SBATCH --partition=gpu
+#SBATCH --gpus=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=64G
+#SBATCH --time=72:00:00
+#SBATCH --output=/project/wachiranun.sir/mycoscan/logs/%x_%j.out
+#SBATCH --error=/project/wachiranun.sir/mycoscan/logs/%x_%j.err
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=wachiranun.sir@cmu.ac.th
+# Usage: sbatch --job-name=&lt;name&gt; sweep.sbatch configs/sweeps/&lt;sweep&gt;.toml
+set -euo pipefail
+source /project/wachiranun.sir/mycoscan/env.sh
+export HF_HUB_OFFLINE=1
+cd "$REPO"
+SWEEP="$1"
+NAME=$(python -c "import tomllib,sys; print(tomllib.load(open(sys.argv[1],'rb'))['name'])" "$SWEEP")
+mycoscan sweep "$SWEEP" || echo "sweep exited 1: at least one cell failed, see runs/$NAME/sweep_summary.json"
+mycoscan results "runs/$NAME" --out "runs/$NAME/table.csv"
+mycoscan learning-curve "runs/$NAME" --x images --out "runs/$NAME/curve.png"
+EOF
+sbatch --job-name=p7-curve jobs/sweep.sbatch configs/sweeps/p7_learning_curve.toml</code></pre>
+  <p>The sweep inherits <code>num_workers=0</code> from its base config, since cell overrides cannot be injected from the command line. If loading is the bottleneck, add <code>num_workers = 4</code> and <code>amp = true</code> to the base config file and commit it.</p>
+  <h3>9.5 P10: export the Stage-1 checkpoints</h3>
+  <p>Two GPU one-offs through the <code>cpu.sbatch</code> wrapper with the partition overridden on the command line:</p>
+<pre><button class="copy" type="button">Copy</button><code>cd /project/wachiranun.sir/mycoscan
+G="--partition=gpu --gpus=1 --cpus-per-task=4 --mem=64G --time=12:00:00"
+sbatch $G --job-name=stage1-micro jobs/cpu.sbatch mycoscan export-stage1 --config configs/openfungi_stage1_micro.toml --set num_workers=4 --set amp=true
+sbatch $G --job-name=stage1-macro jobs/cpu.sbatch mycoscan export-stage1 --config configs/openfungi_stage1_micro.toml --set modality=colony --set num_workers=4 --set amp=true
+ls -la runs/stage1/            <span class="c"># of_micro_&lt;arch&gt;.pt, of_macro_&lt;arch&gt;.pt and their provenance JSON</span></code></pre>
+  <p>Edit <code>configs/openfungi_stage1_micro.toml</code> first so its <code>arch</code> and recipe match the winner of P1 to P5, and commit that edit.</p>
+  <h3>9.6 Tables, explain panels and the blinded review</h3>
+<pre><button class="copy" type="button">Copy</button><code>source /project/wachiranun.sir/mycoscan/env.sh &amp;&amp; cd "$REPO"
+mycoscan results runs --out runs/plan1_table.csv                        <span class="c"># light; fine on the login node</span>
+mycoscan compare runs/openfungi_macro_well_supported runs/openfungi_macro_ws_convnext_in22k
+G="--partition=gpu --gpus=1 --cpus-per-task=4 --mem=32G --time=01:00:00"
+sbatch $G --job-name=xai-review "$PROJ"/jobs/cpu.sbatch mycoscan explain \
+    --checkpoint runs/openfungi_macro_well_supported/model.pt --manifest data/openfungi/manifest.csv \
+    --splits-file data/openfungi/splits_v1.csv --pool B --per-class 5 --seed 0 --out runs/xai_review</code></pre>
+  <p><code>runs/xai_review/review_sheet.csv</code> and the panel PNGs go to the two raters; <code>review_key.csv</code> stays with you. Score the returned sheets with <code>mycoscan score-review</code> on the login node.</p>
+</section>
+
+<section id="plan2">
+  <h2><span class="num">10</span>Plan 2: CMU main study</h2>
+  <ol class="steps">
+    <li><strong>Upload</strong> <code>data/cmu/manifest.csv</code> and the images it points to into the clone (section 5), and the sealed <code>splits_cmu.csv</code> with its <code>.sha256</code> if sealing happened elsewhere. Otherwise the sealer runs <code>mycoscan seal</code> on the login node; it is deterministic and light.</li>
+    <li><strong>Point the Stage-2 configs at the Stage-1 checkpoints.</strong> In <code>configs/cmu_microscopic.toml</code> set <code>weights = "runs/stage1/of_micro_&lt;arch&gt;.pt"</code>, the matching <code>arch</code>, <code>splits_file = "data/cmu/splits_cmu.csv"</code> and <code>seeds = [0, 1, 2]</code>; same for <code>cmu_colony.toml</code> with the macro checkpoint. Commit.</li>
+    <li><strong>Sequential and direct arms, paired.</strong>
+<pre><button class="copy" type="button">Copy</button><code>cd /project/wachiranun.sir/mycoscan
+s=$(sbatch --parsable --job-name=m1-micro-seq --time=72:00:00 jobs/train.sbatch configs/cmu_microscopic.toml \
+      --set run_name=cmu_micro_convnext_sequential)
+d=$(sbatch --parsable --job-name=m1-micro-direct --time=72:00:00 jobs/train.sbatch configs/cmu_microscopic.toml \
+      --set weights=imagenet --set run_name=cmu_micro_convnext_direct)
+sbatch --dependency=afterok:$s:$d --job-name=m1-paired jobs/cpu.sbatch \
+      mycoscan paired runs/cmu_micro_convnext_sequential runs/cmu_micro_convnext_direct --out runs/m1_paired.json</code></pre></li>
+    <li><strong>Colony arm and late fusion</strong> follow the same pattern with <code>cmu_colony.toml</code>, then <code>mycoscan fuse --colony runs/cmu_colony_... --micro runs/cmu_micro_... --out runs/cmu_fused</code> as a CPU job (the MLP method embeds images and wants a GPU; add the GPU flags from section 9.5).</li>
+    <li><strong>The sealed test set, once.</strong> <code>mycoscan eval --checkpoint runs/&lt;final&gt;/model.pt --manifest data/cmu/manifest.csv --out runs/eval_micro_test</code> applies the stored tau and never re-tunes it. Run it as a GPU job only after the development-set analysis is frozen.</li>
+  </ol>
+  <div class="warn"><p><strong>Leakage guards are on</strong>A training loader that meets a <code>split = test</code> row or a Pool B row stops with an error naming the row. If a Plan 2 job dies that way, the manifest or splits file in the clone is wrong; do not patch around it.</p></div>
+</section>
+
+<section id="monitor">
+  <h2><span class="num">11</span>Monitor jobs</h2>
+  <div class="tbl"><table>
+    <thead><tr><th>Need</th><th>Command</th></tr></thead>
+    <tbody>
+      <tr><td>My queue, with reasons</td><td><code>squeue -u "$USER" -o "%.9i %.16j %.9P %.3t %.11M %.11l %.20R"</code></td></tr>
+      <tr><td>Follow a running log</td><td><code>tail -f /project/wachiranun.sir/mycoscan/logs/&lt;name&gt;_&lt;jobid&gt;.out</code></td></tr>
+      <tr><td>Where is my job, how long left</td><td><code>scontrol show job &lt;jobid&gt; | grep -E "JobState|RunTime|TimeLimit|NodeList|StdOut"</code></td></tr>
+      <tr><td>GPU use on the node it landed on</td><td><code>nvtopc1</code> … <code>nvtopc4</code> (node number from <code>NodeList=computeN</code>); Ctrl-C exits</td></tr>
+      <tr><td>Finished jobs, exit state and peak memory</td><td><code>sacct -u "$USER" --starttime today --format=JobID,JobName%20,Partition,State,Elapsed,MaxRSS,ExitCode</code></td></tr>
+      <tr><td>Cancel one job, or all of mine</td><td><code>scancel &lt;jobid&gt;</code>, <code>scancel -u "$USER"</code></td></tr>
+      <tr><td>Partition load and limits</td><td><code>sinfo</code>, <code>scontrol show partition gpu</code></td></tr>
+      <tr><td>Disk and credit</td><td><code>myquota</code>, <code>mycredit</code></td></tr>
+      <tr><td>Resource cost of a finished run</td><td><code>python -c "import json;print(json.load(open('runs/&lt;run&gt;/metrics.json'))['resources'])"</code></td></tr>
+    </tbody>
+  </table></div>
+  <p>Email arrives at the address in <code>--mail-user</code> when a job ends or fails. A pending job with reason <code>Priority</code> or <code>Resources</code> will run; <code>QOSMaxJobsPerUserLimit</code> means you are over the 2-running limit; <code>PartitionTimeLimit</code> means <code>--time</code> exceeds the partition cap and the job will never start.</p>
+</section>
+
+<section id="results">
+  <h2><span class="num">12</span>Bring results back</h2>
+  <p>Each run directory holds small CSV, JSON and PNG files plus checkpoints (<code>model.pt</code> and one per fold, tens to hundreds of MB each). Pull the small files often and the checkpoints only for the models you will ship or explain.</p>
+  <p>Pack the metrics and plots without checkpoints on ERAWAN, then copy one file. Do not pipe tar through PowerShell: Windows PowerShell treats the stream as text and corrupts it.</p>
+<pre><button class="copy" type="button">Copy</button><code><span class="c"># on ERAWAN</span>
+source /project/wachiranun.sir/mycoscan/env.sh
+tar -cf "$PROJ/runs_$(date +%Y%m%d).tar" --exclude='*.pt' --exclude='feature_cache' -C "$REPO" runs
+ls -lh "$PROJ"/runs_*.tar</code></pre>
+<pre><button class="copy" type="button">Copy</button><code><span class="c"># on the laptop (PowerShell)</span>
+cd C:\Users\USER\OneDrive\Documents\GitHub\CMU-MYCOSCAN
+scp "wachiranun.sir@cmu.ac.th@erawan.cmu.ac.th:/project/wachiranun.sir/mycoscan/runs_*.tar" .
+tar -xf (Get-Item runs_*.tar | Select-Object -Last 1).Name
+Get-ChildItem runs</code></pre>
+  <p>One deployable model:</p>
+<pre><button class="copy" type="button">Copy</button><code>scp "wachiranun.sir@cmu.ac.th@erawan.cmu.ac.th:/project/wachiranun.sir/mycoscan/CMU-MYCOSCAN/runs/&lt;run&gt;/{model.pt,model_card.json}" .\runs\&lt;run&gt;\</code></pre>
+  <p>Keep a second copy of anything irreplaceable (the frozen splits files, Stage-1 checkpoints, the sealed CMU split) under <code>/home</code>, which is the 1 TB archive tier, or on the laptop. <code>/project</code> quota is 200 GB and <code>runs/</code> grows by several GB per multi-seed experiment; delete <code>folds/*/model.pt</code> of superseded runs when space runs short.</p>
+</section>
+
+<section id="trouble">
+  <h2><span class="num">13</span>Troubleshooting</h2>
+  <div class="tbl"><table>
+    <thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td><code>mycoscan: command not found</code> in the .err file</td><td><code>env.sh</code> not sourced, or conda env missing</td><td>Every script starts with <code>source /project/wachiranun.sir/mycoscan/env.sh</code>. Run it interactively and <code>which mycoscan</code>.</td></tr>
+      <tr><td><code>cuda_available: false</code> inside a GPU job</td><td>CPU-only torch wheel installed, or job landed without <code>--gpus</code></td><td><code>pip install torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cu126 --force-reinstall</code> on the login node; check <code>nvidia-smi</code> in the log.</td></tr>
+      <tr><td>Hugging Face "offline mode" or connection error</td><td>Compute node tried to download a weight</td><td>Add the <code>(arch, weights)</code> pair to the section 6 snippet, run it on the login node, resubmit.</td></tr>
+      <tr><td><code>CUDA out of memory</code></td><td>Batch too large for the backbone or bag size</td><td><code>--set batch_size=16</code>; keep <code>amp=true</code>. ViT-Base and attention-MIL bags are the usual culprits.</td></tr>
+      <tr><td>State <code>TIMEOUT</code> in <code>sacct</code></td><td><code>--time</code> too short; no resume exists</td><td>Read the per-epoch timing in the log, resubmit with 1.5× the projected total. Lower <code>epochs</code> only as a deliberate, committed change.</td></tr>
+      <tr><td>State <code>OUT_OF_MEMORY</code> (host RAM)</td><td><code>--mem</code> too small, often during bootstrap CIs or linear-probe feature caching</td><td>Resubmit with <code>--mem=128G</code>; on <code>gpu-h100</code> or <code>mixed</code> you may also raise <code>--cpus-per-task</code>.</td></tr>
+      <tr><td>Job pending forever, reason <code>PartitionTimeLimit</code></td><td><code>--time</code> above the partition cap (168 h gpu, 120 h gpu-h100, 24 h mixed)</td><td><code>scancel</code> and resubmit under the cap, or split the sweep.</td></tr>
+      <tr><td><code>Disk quota exceeded</code></td><td>/project at 200 GB</td><td><code>myquota</code>; remove <code>runs/*/folds/*/model.pt</code> of superseded runs, <code>data/synthetic</code>, and the smoke run.</td></tr>
+      <tr><td>Run refuses to start: manifest hash differs from the splits file</td><td>Manifest was rebuilt after freezing <code>splits_v1.csv</code></td><td>Restore the manifest that matches the sidecar hash (your <code>$PROJ</code> copy). Never regenerate a frozen split.</td></tr>
+      <tr><td><code>dirty: true</code> in provenance</td><td>Uncommitted edits in the clone</td><td><code>git status</code>; commit config changes or revert them before the real runs.</td></tr>
+      <tr><td>Python 3.6 or torch 1.10 shows up</td><td>Conda env not active, system modules leaking</td><td><code>module purge</code> is in <code>env.sh</code>; confirm with <code>python -c "import sys,torch;print(sys.version,torch.__version__)"</code>.</td></tr>
+      <tr><td>Plots missing, Tk or display error</td><td>No X display on compute nodes</td><td><code>MPLBACKEND=Agg</code> is set in <code>env.sh</code>; make sure the script sources it before any Python runs.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="checklist">
+  <h2><span class="num">14</span>Checklist</h2>
+  <ul class="check">
+    <li><input type="checkbox" id="c1"><label for="c1">Branch pushed to GitHub; <code>git log</code> on ERAWAN shows the expected commit</label></li>
+    <li><input type="checkbox" id="c2"><label for="c2"><code>/project/wachiranun.sir/mycoscan/</code> laid out; <code>env.sh</code> sources cleanly and <code>which mycoscan</code> resolves</label></li>
+    <li><input type="checkbox" id="c3"><label for="c3"><code>openfungi/</code> unpacked inside the clone; file count and hash checked</label></li>
+    <li><input type="checkbox" id="c4"><label for="c4">Pretrained weights prefetched for every <code>arch</code> and <code>weights</code> in the configs</label></li>
+    <li><input type="checkbox" id="c5"><label for="c5">Smoke job <code>COMPLETED</code> with <code>cuda_available: true</code></label></li>
+    <li><input type="checkbox" id="c6"><label for="c6"><code>pytest</code> job passed on the <code>cpu</code> partition</label></li>
+    <li><input type="checkbox" id="c7"><label for="c7">Manifest built; contact sheets reviewed; <code>splits_v1.csv</code> frozen and backed up with its sidecar</label></li>
+    <li><input type="checkbox" id="c8"><label for="c8">P0 pair submitted; stage-1 pretrain submitted</label></li>
+    <li><input type="checkbox" id="c9"><label for="c9">Results pulled to the laptop; <code>mycredit</code> and <code>myquota</code> checked</label></li>
+  </ul>
+  <p>Checkbox state is kept in this browser only.</p>
+</section>
+
+</main>
+</div>
+
+<footer><div class="wrap">Sources: ERAWAN wiki pages Slurm, Sbatch, Slurm Commands, Job Submission Methods, Software Usage Example, Storage, File Transfer and Resource Monitoring at hpc.cmu.ac.th (read 2026-10-08); CMU-MYCOSCAN README, pyproject and configs at commit 5f2a407. Partition limits and software versions change; <code>sinfo</code> and <code>module avail</code> on the cluster are authoritative.</div></footer>
+
+<script>
+(function(){
+  var root=document.documentElement, btn=document.getElementById('themeBtn');
+  try{var t=localStorage.getItem('runbook-theme'); if(t) root.setAttribute('data-theme',t);}catch(e){}
+  btn.addEventListener('click',function(){
+    var dark=root.getAttribute('data-theme')==='dark' || (!root.getAttribute('data-theme') && matchMedia('(prefers-color-scheme: dark)').matches);
+    var next=dark?'light':'dark'; root.setAttribute('data-theme',next);
+    try{localStorage.setItem('runbook-theme',next);}catch(e){}
+  });
+  document.querySelectorAll('pre .copy').forEach(function(b){
+    b.addEventListener('click',function(){
+      var code=b.parentNode.querySelector('code'); var text=code.innerText;
+      navigator.clipboard.writeText(text).then(function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy';},1200);});
+    });
+  });
+  document.querySelectorAll('.check input').forEach(function(cb){
+    try{cb.checked=localStorage.getItem('runbook-'+cb.id)==='1';}catch(e){}
+    cb.addEventListener('change',function(){try{localStorage.setItem('runbook-'+cb.id,cb.checked?'1':'0');}catch(e){}});
+  });
+  var links=document.querySelectorAll('nav.toc a'), secs=document.querySelectorAll('main section');
+  if('IntersectionObserver' in window){
+    var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){links.forEach(function(l){l.classList.toggle('active',l.getAttribute('href')==='#'+e.target.id);});}});},{rootMargin:'-20% 0px -70% 0px'});
+    secs.forEach(function(s){io.observe(s);});
+  }
+})();
+</script>
+</body>
+</html>
