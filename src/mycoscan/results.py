@@ -5,6 +5,10 @@ seed's pooled out-of-fold predictions (`fold = "pooled"`), or a holdout run. A
 linear-probe run gives one row per classifier. Cell rows aggregate the fold rows
 of each config cell (a sweep cell, or one multi-seed run) as mean and SD over
 folds and seeds; pooled rows are left out of that, since they repeat the folds.
+
+Run-level rows (pooled, holdout, evaluation) come first, in run-name order, then the
+fold rows, so twin runs named alike (P0's `..._grouped` and `..._leaky`) sit side by
+side. A leaky run's rows carry the marker "LEAKY, comparison only".
 """
 from __future__ import annotations
 
@@ -19,10 +23,14 @@ LEVEL_COLUMNS = {
     "isolate_accuracy": ("isolate_level", "accuracy"),
     "isolate_top2_accuracy": ("isolate_level", "top2_accuracy"),
     "n_isolates": ("isolate_level", "n"),
+    "isolate_ece": ("isolate_level", "calibration", "ece"),
+    "isolate_coverage_at_tau": ("isolate_level", "reject_option", "at_tau", "coverage"),
+    "isolate_accuracy_at_tau": ("isolate_level", "reject_option", "at_tau", "accuracy"),
     "image_macro_f1": ("image_level", "macro", "f1"),
     "image_accuracy": ("image_level", "accuracy"),
 }
 RUN_COLUMNS = {
+    "tau": ("tau", "value"),
     "train_fraction": ("subsample", "train_fraction"),
     "device": ("resources", "device"),
     "wall_seconds": ("resources", "wall_seconds"),
@@ -33,6 +41,7 @@ RUN_COLUMNS = {
     "manifest_sha256": ("provenance", "manifest_sha256"),
 }
 X_AXES = {"images": "images_per_class", "groups": "groups_per_class"}
+LEAKY_MARKER = "LEAKY, comparison only"
 CELL_METRICS = ("isolate_macro_f1", "isolate_accuracy")
 
 
@@ -58,20 +67,27 @@ def run_rows(root: str | Path) -> pd.DataFrame:
         run = path.parent.relative_to(root).as_posix() or "."
         common = {"run": run, "run_name": m.get("run_name", path.parent.name), "cell": m.get("cell", run),
                   "seed": m.get("seed"), "fold": m.get("fold", ""), "split": m.get("split", ""),
-                  "leaky": m.get("leaky", False), **{k: _dig(m, p) for k, p in RUN_COLUMNS.items()},
+                  "leaky": m.get("leaky", False), "marker": LEAKY_MARKER if m.get("leaky") else "",
+                  **{k: _dig(m, p) for k, p in RUN_COLUMNS.items()},
                   **{column: _mean_per_class(m, column) for column in X_AXES.values()}}
         blocks = m.get("classifiers") or {m.get("classifier", "network"): m}
         for classifier, block in blocks.items():
             rows.append({**common, "classifier": classifier, **{k: _dig(block, p) for k, p in LEVEL_COLUMNS.items()}})
-    return pd.DataFrame(rows)
+    runs = pd.DataFrame(rows)
+    if runs.empty:
+        return runs
+    fold_row = ~runs["fold"].isin(["pooled", "holdout", ""])
+    return runs.assign(_fold_row=fold_row).sort_values(["_fold_row", "run_name"], kind="stable").drop(
+        columns="_fold_row").reset_index(drop=True)
 
 
 def cell_rows(runs: pd.DataFrame) -> pd.DataFrame:
     rows = []
     folds = runs[runs["fold"] != "pooled"]
     for (cell, classifier), group in folds.groupby(["cell", "classifier"], sort=True):
-        row = {"cell": cell, "classifier": classifier, "n_runs": len(group),
-               "seeds": group["seed"].nunique(), "folds": group["fold"].nunique()}
+        leaky = bool(group["leaky"].any())
+        row = {"cell": cell, "classifier": classifier, "leaky": leaky, "marker": LEAKY_MARKER if leaky else "",
+               "n_runs": len(group), "seeds": group["seed"].nunique(), "folds": group["fold"].nunique()}
         for metric in CELL_METRICS:
             values = group[metric].astype(float).to_numpy()
             row[f"{metric}_mean"] = float(np.mean(values))

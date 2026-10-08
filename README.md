@@ -1,6 +1,6 @@
 # CMU MycoScan: AI classification model
 
-Component 2 of CMU MycoScan. It trains and validates image classifiers (any [timm](https://github.com/huggingface/pytorch-image-models) backbone, PyTorch) for fungal colony and microscopy images. It also produces Grad-CAM and saliency maps for expert review and exposes a `predict(image) -> {class: probability}` entry point for the web app.
+Component 2 of CMU MycoScan. It trains and validates image classifiers (any [timm](https://github.com/huggingface/pytorch-image-models) backbone, PyTorch) for fungal colony and microscopy images. It also produces Grad-CAM (CNNs) or attention-rollout (ViTs) and saliency maps for a blinded two-rater expert review, and exposes a `predict(image) -> {class: probability}` entry point for the web app.
 
 Design decisions and their reasons are in [docs/design.md](docs/design.md).
 
@@ -94,7 +94,7 @@ mycoscan train --config configs/cmu_microscopic.toml --set arch=convnext_tiny --
 | `none` | random initialisation |
 | a path | an earlier-stage checkpoint of the same arch; its head is replaced |
 
-To pin an exact timm tag, put it in `arch` (`arch = "convnext_tiny.fb_in22k_ft_in1k"`). A config whose arch has no weights of the requested kind fails at load time and lists the tags it does have. Verified to build and train: `convnext_tiny`, `convnext_small`, `tf_efficientnetv2_s`, `densenet121`, `resnet50`, `vit_small_patch14_dinov2`, `vit_small_patch16_dinov3`, `vit_base_patch16_224`, `convnext_small.dinov3_lvd1689m`. Transformers are built for `image_size`. `amp = true` turns on mixed precision (float16 on GPU, bfloat16 on CPU) and `grad_clip` caps the gradient norm (0, the default, turns it off).
+To pin an exact timm tag, put it in `arch` (`arch = "convnext_tiny.fb_in22k_ft_in1k"`). A config whose arch has no weights of the requested kind fails at load time and lists the tags it does have. Verified to build and train: `convnext_tiny`, `convnext_small`, `tf_efficientnetv2_s`, `densenet121`, `resnet50`, `vit_small_patch14_dinov2`, `vit_small_patch16_dinov3`, `vit_base_patch16_224`, `convnext_small.dinov3_lvd1689m`. `arch = "small_cnn"` is a small CNN trained from scratch (four conv-BN-ReLU-max-pool blocks of 32 to 256 channels, then global pooling and a linear head) for the P0 reproduction; it has no pretrained weights, so it needs `weights = "none"`. Transformers are built for `image_size`. `amp = true` turns on mixed precision (float16 on GPU, bfloat16 on CPU) and `grad_clip` caps the gradient norm (0, the default, turns it off).
 
 ### Fine-tuning policies
 
@@ -107,6 +107,18 @@ To pin an exact timm tag, put it in `arch` (`arch = "convnext_tiny.fb_in22k_ft_i
 | `ema`, `ema_decay` | `ema = true` keeps an exponential moving average of the weights (`ema_decay`, default 0.999, reached after a warm-up of `(1 + n) / (10 + n)` over the first steps). Validation and the saved checkpoints use the averaged weights. |
 
 `finetune = "linear_probe"` trains nothing. It extracts frozen features once with the evaluation transform and caches them in `<output_dir>/feature_cache/`. The cache key covers the manifest hash, the arch, the weights, the image size, autocontrast and the plate crop, so a second run on the same data reuses them and a changed manifest does not. Each fold fits an L2-regularised logistic regression and a cosine k-NN (k = 5) on the training groups' features. `predictions.csv` has a row per image for each classifier, told apart by the `classifier` column. `metrics.json` holds the logistic regression's block at the top and both under `classifiers`. The checkpoints are the frozen backbone with the logistic regression as its head, so `eval`, `predict` and `explain` work on them as usual. Both probes are deterministic, so a probe config refuses more than one entry in `seeds`. Its `resources` include the feature extraction.
+
+### Bags and pooling
+
+| key | values |
+|---|---|
+| `bag` | `none` (default), `isolate` (all images of an isolate), `isolate_device` (its images from one device), `tiles` (the tiles of one image) |
+| `pooling` | `mean` (default) or `max`: how a bag's instance predictions become the bag prediction. `max` takes each class's highest probability over the instances and renormalises. |
+| `tile_grid`, `tile_size` | for `bag = "tiles"`: the image is resized to `columns * tile_size` by `rows * tile_size` and cut into that grid (default `[3, 2]` at 640 px, which fits a 3:2 camera frame) |
+
+Both poolings are parameter-free, so training stays single-instance: single images, or single tiles each labelled with its image's class. Pooling is applied when predicting, at validation and at `mycoscan eval` alike, from the `bag` and `pooling` stored in the checkpoint. `bag = "isolate"` with `pooling = "mean"` gives the same isolate-level metrics as `bag = "none"`, the mean-of-images vote. A bag batch is a padded tensor with a mask, so bags of 10 and 30 instances batch together and padding contributes nothing.
+
+With a bag, `predictions.csv` holds a row per image (`level = "image"`; per tile, `level = "tile"`, for tile bags) and a row per bag (`level = "bag"`, with its `bag` id and `n_instances`). Isolate-level metrics pool the bag rows of each isolate, so `isolate_device` bags are pooled per device, then across devices. Image-level metrics score the image rows (for tile bags, the bag rows, since each bag is one image). Subgroup blocks pool each subgroup's own images. A bag is always built inside one group, and every fold checks that no bag straddles train and validation. Bags need a network: `finetune = "linear_probe"` and `split = "image_random"` refuse them.
 
 ### OpenFungi manifest and pseudo-groups
 
@@ -129,6 +141,16 @@ This assigns every OpenFungi group to Pool A (70%, development, with 5 cross-val
 
 `split = "image_random"` splits images at random and ignores groups, which reproduces the leaky OpenFungi paper number. Its outputs are marked `"leaky": true` and its log says "leaky, comparison only".
 
+#### P0: the paper's number, leaky and grouped
+
+```bash
+mycoscan train --config configs/p0_small_cnn_micro_leaky.toml     # image-level random split, as the paper did
+mycoscan train --config configs/p0_small_cnn_micro_grouped.toml   # grouped 5-fold CV inside Pool A
+mycoscan results runs --out runs/p0_table.csv
+```
+
+The two configs run the same `small_cnn` at 128 px on the micrographs of Pool A and differ only in `split` (and `run_name`); `--set modality=colony` runs the colony photos. In the results table the two pooled rows sit side by side, and the leaky one carries the marker `LEAKY, comparison only`. The gap between them is the leakage inflation. The test suite shows it on a planted-duplicate set whose labels are unrelated to image content: the grouped split stays near chance and the leaky split does not.
+
 ### Sealed CMU test set
 
 ```bash
@@ -149,7 +171,36 @@ mycoscan results runs/p7_learning_curve --out runs/p7_learning_curve/table.csv
 mycoscan learning-curve runs/p7_learning_curve --x images --out runs/p7_learning_curve/curve.png
 ```
 
-Each cell runs as `<run_name>__<key>-<value>_...`, so its directory says what it changed. A sweep whose cells set `run_name` or `output_dir`, or whose cells would land in the same directory, is refused before anything runs. A cell that fails is logged, the rest still run, and `sweep_summary.json` names it; the command then exits with status 1. `mycoscan results` reads every `metrics.json` under a directory. It writes one row per run (each fold of each seed, and each seed's pooled predictions, with run name, cell, seed, fold, classifier, isolate macro-F1, accuracy, train fraction, cost and the provenance commit), and in `<stem>_cells.csv` one row per cell with the mean and SD over its folds and seeds. `mycoscan learning-curve` plots each seed's pooled isolate macro-F1 against images (or groups, `--x groups`) per class, with the mean and a ±SD band, and writes the points beside the plot as CSV.
+Each cell runs as `<run_name>__<key>-<value>_...`, so its directory says what it changed. A sweep whose cells set `run_name` or `output_dir`, or whose cells would land in the same directory, is refused before anything runs. A cell that fails is logged, the rest still run, and `sweep_summary.json` names it; the command then exits with status 1. `mycoscan results` reads every `metrics.json` under a directory. It writes one row per run (each fold of each seed, and each seed's pooled predictions, with run name, cell, seed, fold, classifier, isolate macro-F1, accuracy, train fraction, cost and the provenance commit), and in `<stem>_cells.csv` one row per cell with the mean and SD over its folds and seeds. `mycoscan learning-curve` plots each seed's pooled isolate macro-F1 against images (or groups, `--x groups`) per class, with the mean and a ±SD band, and writes the points beside the plot as CSV. The run table lists run-level rows (pooled, holdout, evaluation) first, in run-name order, then the fold rows; it also has `tau`, `isolate_ece`, `isolate_coverage_at_tau`, `isolate_accuracy_at_tau` and the `marker` of leaky runs.
+
+### Paired comparison: sequential against direct
+
+```bash
+mycoscan paired runs/cmu_micro_convnext_sequential runs/cmu_micro_convnext_direct --out runs/m1_paired.json
+mycoscan paired runs/seq runs/direct --set min_gain=0.03 --set bootstrap=5000
+```
+
+A run whose `weights` is a checkpoint is sequential; one starting from `imagenet`, `imagenet22k`, `dino` or `none` is direct. Each sequential run is paired with each direct run of the same arch, fold by fold and seed by seed, from their `summary.json` (single- or multi-seed runs alike). For each pair the command prints the mean difference in isolate macro-F1 (sequential minus direct) in points, its bootstrap CI over the (fold, seed) pairs, the Wilcoxon signed-rank p and the pre-registered verdict: sequential is superior only when the CI excludes 0 and the mean gain is at least 2 points. A sequential run that is worse on average is reported as negative transfer with the recommendation "use direct". The thresholds are config values (`min_gain`, `ci_level`, `require_ci_excludes_zero`, `bootstrap`, `seed`, from `--config` TOML or `--set`) and are written into the `--out` JSON with every pair's differences. The command refuses runs with different seeds, different test isolates (splits file or held-out groups), or different validation images in any fold, and names the first fold that differs.
+
+### Calibration and the reject option
+
+Every metric level reports `calibration` (expected calibration error over `calibration_bins` equal-width confidence bins, default 10, with the reliability table: count, mean confidence and accuracy per bin) and `reject_option` (the accuracy-coverage curve: a call is made when the top probability is at least tau, and "no call" otherwise). `reliability_<level>.png` draws the reliability diagram beside the accuracy-coverage curve.
+
+| key | values |
+|---|---|
+| `tau_rule` | `min_accuracy` (default): the lowest tau whose accepted isolates are at least `tau_target` accurate, so the most coverage. `min_coverage`: the highest tau that still calls at least `tau_target` of isolates. `none`: no reject option. |
+| `tau_target` | 0.9 by default |
+
+tau is chosen once per run on the out-of-fold isolate predictions of every seed, from development rows only; asking it to be tuned on a table with sealed test or Pool B rows raises an error. It is the confidence of the least confident accepted development isolate. It goes into `metrics.json` under `tau` (with the selection record) and into the deployable `model.pt`. The pooled isolate-level metrics report accuracy and coverage at it (`isolate_level.reject_option.at_tau`; tau is an isolate threshold, so the image level keeps only its curve), which is optimistic since tau was chosen on those rows. `mycoscan eval` applies the checkpoint's tau as it is, once, and never re-tunes it, so evaluating the sealed test set gives the honest accuracy and coverage. When no threshold reaches the target, tau is `null` and the log says why.
+
+### Stage-1 checkpoints for Plan 2
+
+```bash
+mycoscan export-stage1 --config configs/openfungi_stage1_micro.toml                        # runs/stage1/of_micro_<arch>.pt
+mycoscan export-stage1 --config configs/openfungi_stage1_micro.toml --set modality=colony   # runs/stage1/of_macro_<arch>.pt
+```
+
+This trains the config's backbone and recipe on every Pool A image of one modality (micro has 5 classes, macro 6) and writes a checkpoint without its head, named by modality and arch, with a JSON of its provenance beside it: commit, manifest and splits hashes, resolved config, classes and the groups it trained on. It refuses to run without a `splits_file`, since that is what holds Pool B out, and the training loader refuses any Pool B row. A Stage-2 config names the file as `weights`. The run then checks that the arch matches, records under `provenance.stage1` that only head parameters were newly initialised, and copies the Stage-1 provenance into its own.
 
 ### Run outputs
 
@@ -158,12 +209,13 @@ Each run writes `runs/<run_name>/` with these files:
 | file | content |
 |---|---|
 | `config.json` | the resolved config |
-| `predictions.csv` | one row per validation image, with out-of-fold probabilities for `kfold` and `loio`, and the `classifier` that produced it (`network`, or `logreg` and `knn` for a linear probe) |
-| `metrics.json` | isolate-level (primary) and image-level (secondary) metrics: accuracy and Top-2 accuracy with Wilson 95% intervals, Cohen's kappa, per-class and macro sensitivity, specificity, PPV, NPV, F1 and AUC, 95% isolate-bootstrap CIs for every one of them, genus and order rollups, and subgroup blocks; plus fold composition, training curves, `subsample`, `resources` (wall seconds, device, GPU-minutes and peak GPU memory, 0 on CPU) and a `provenance` block |
+| `predictions.csv` | one row per validation image, with out-of-fold probabilities for `kfold` and `loio`, the `classifier` that produced it (`network`, or `logreg` and `knn` for a linear probe) and its `level`; with a `bag`, also a row per bag (see Bags and pooling) |
+| `metrics.json` | isolate-level (primary) and image-level (secondary) metrics: accuracy and Top-2 accuracy with Wilson 95% intervals, Cohen's kappa, per-class and macro sensitivity, specificity, PPV, NPV, F1 and AUC, 95% isolate-bootstrap CIs for every one of them, ECE and reliability bins, the accuracy-coverage curve and the metrics at tau, genus and order rollups, and subgroup blocks; plus the chosen `tau`, fold composition, training curves, `subsample`, `resources` (wall seconds, device, GPU-minutes and peak GPU memory, 0 on CPU) and a `provenance` block |
 | `confusion_image_level.png`, `confusion_isolate_level.png` | confusion matrices |
+| `reliability_image_level.png`, `reliability_isolate_level.png` | reliability diagram and accuracy-coverage curve, tau marked |
 | `folds/<fold>/metrics.json`, `folds/<fold>/model.pt` | each fold's metrics (without bootstrap) and checkpoint (`kfold`, `loio`) |
-| `summary.json` | mean and SD of isolate macro-F1 and accuracy over all folds and seeds, and a provenance block that adds the seeds, the fold names and membership hash, and the hash of each seed's pooled predictions |
-| `model.pt` | the deployable model. For `holdout` this is the model trained on 80% of isolates. For `kfold` and `loio` it is retrained on all isolates after cross-validation, with `seed`. |
+| `summary.json` | mean and SD of isolate macro-F1 and accuracy over all folds and seeds, and a provenance block that adds the seeds, the fold names and membership hashes (all folds, and each fold), the held-out groups, and the hash of each seed's pooled predictions |
+| `model.pt` | the deployable model, with its `tau`, `bag` and `pooling`. For `holdout` this is the model trained on 80% of isolates. For `kfold` and `loio` it is retrained on all isolates after cross-validation, with `seed`. |
 
 With `seeds` set, everything but `config.json`, `summary.json` and the final `model.pt` moves into `seed<seed>/`, one directory per seed.
 
@@ -191,10 +243,13 @@ Without `MLFLOW_TRACKING_URI`, MLflow writes to `mlflow.db` in the working direc
 # Score a saved model on a new manifest, for example a later external test set
 mycoscan eval --checkpoint runs/cmu_microscopic_densenet121_head/model.pt --manifest data/external/manifest.csv --out runs/external_eval
 
-# Grad-CAM and SmoothGrad panels plus review_sheet.csv for the mycologists.
-# Explain held-out images: a holdout run's predictions.csv works as a manifest.
-mycoscan explain --checkpoint runs/<holdout_run>/model.pt --manifest runs/<holdout_run>/predictions.csv --per-class 3 --out runs/xai_review
-mycoscan explain --checkpoint runs/<run>/model.pt --images a.png b.jpg --out runs/xai_adhoc
+# Grad-CAM (CNN) or attention rollout (ViT) and SmoothGrad panels plus a blinded review sheet for the mycologists.
+# Sample 5 images per class from Pool B (or --pool test with a sealed CMU file), reproducibly:
+mycoscan explain --checkpoint runs/<run>/model.pt --manifest data/openfungi/manifest.csv --splits-file data/openfungi/splits_v1.csv --pool B --per-class 5 --seed 0 --out runs/xai_review
+# A holdout run's predictions.csv works as a manifest of its held-out images:
+mycoscan explain --checkpoint runs/<holdout_run>/model.pt --manifest runs/<holdout_run>/predictions.csv --per-class 3 --out runs/xai_holdout
+mycoscan explain --checkpoint runs/<run>/model.pt --images a.png b.jpg --out runs/xai_adhoc --reveal
+mycoscan score-review runs/xai_review/review_sheet_rater1.csv runs/xai_review/review_sheet_rater2.csv --out runs/xai_review/scores.json
 
 mycoscan predict --checkpoint runs/<run>/model.pt image.jpg
 
@@ -216,7 +271,7 @@ Rhizopus = ["Rhizopus"]
 
 The model's probabilities are summed into each reference label. The model classes that no label covers go into an `unmapped` column, so predicting one of them counts as wrong. Rows whose reference label is not in the map are dropped. `metrics.json` names both under `label_mapping`.
 
-`review_sheet.csv` has one row per panel and empty columns for the reviewer to fill in: `reviewer`, `concordant_with_morphology`, `highlighted_structure`, `artifact_suspected`, `notes`.
+The map is picked from the checkpoint: attention rollout for a vision transformer (attention averaged over heads, with the residual added, multiplied through the layers and read from the class token), Grad-CAM for anything else. Both write the same `review_sheet.csv`: one row per panel with `panel`, `method`, `predicted`, `probability`, `true_species`, `image_path`, and for each of two raters `rater<k>_focus` and `rater<k>_notes`. A rater judges where the map points on a 3-point scale: `structure` (the diagnostic morphology), `partial` or `background`. The sheet and the panels are blinded: they show the model's call but not the true label or the image path (OpenFungi paths name the class), unless `--reveal` is passed. `review_key.csv` maps each panel to its image and true label; keep it from the raters. `--per-class` draws that many images per class at random with `--seed` (all of a class's images when it has fewer). `mycoscan score-review` reads one sheet with both raters, or one sheet per rater merged by panel, refuses values off the scale, and reports per rater the share of panels judged structure, partial and background, and the raters' agreement (percent and Cohen's kappa, from the same kappa code the metric block uses).
 
 From Python (the web app):
 
@@ -246,4 +301,4 @@ pytest
 pytest -m network     # also downloads pretrained weights and trains on them
 ```
 
-The suite runs on CPU in a few minutes. It covers isolate leakage for all three split strategies, the Pool A / Pool B partition and CMU sealing, transforms (validation is never augmented), sampler weights, metrics against hand-computed values, freeze, LoRA, layer-decay and EMA policies, staged-transfer loading, the linear probe and its feature cache, OpenFungi pseudo-grouping, multi-seed runs, sweeps and results tables, Grad-CAM and saliency maps, and a train, evaluate, explain and predict smoke run. `pytest -m network` also builds a manifest from the real `openfungi/` folders when they are present.
+The suite runs on CPU in a few minutes. It covers isolate leakage for all three split strategies, the Pool A / Pool B partition and CMU sealing, transforms (validation is never augmented), sampler weights, metrics against hand-computed values (including ECE, the accuracy-coverage curve and tau selection), freeze, LoRA, layer-decay and EMA policies, staged-transfer loading and Stage-1 export, the linear probe and its feature cache, OpenFungi pseudo-grouping, bags, tiles and pooling, the P0 leakage inflation on planted duplicates, multi-seed runs, sweeps, results tables and the paired comparison, Grad-CAM, attention rollout, saliency maps and review scoring, and a train, evaluate, explain and predict smoke run. `pytest -m network` also builds a manifest from the real `openfungi/` folders when they are present.

@@ -1,0 +1,17 @@
+# P0, leaky: the same small CNN and recipe as p0_small_cnn_micro_grouped.toml, but split image by image
+# at random as the OpenFungi paper did, so shots of one plate land in training and validation alike.
+# Its outputs are marked "LEAKY, comparison only". Same Pool A as the grouped run; only the split differs.
+run_name = "p0_small_cnn_micro_leaky"
+manifest = "data/openfungi/manifest.csv"
+splits_file = "data/openfungi/splits_v1.csv"
+source = "openfungi"
+modality = "microscopic"
+arch = "small_cnn"
+weights = "none"
+finetune = "full"
+image_size = 128
+split = "image_random"
+n_folds = 5
+epochs = 30
+batch_size = 32
+lr = 1e-3

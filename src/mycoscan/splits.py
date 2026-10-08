@@ -271,6 +271,14 @@ def apply_splits(df: pd.DataFrame, splits: pd.DataFrame) -> pd.DataFrame:
     return df.assign(**{col: df["group"].map(by_group[col]) for col in ("pool", "split", "fold") if col in by_group})
 
 
+def held_out_mask(df: pd.DataFrame) -> pd.Series:
+    """Rows reserved for external testing: OpenFungi Pool B, or the sealed CMU test split."""
+    held_out = df["split"].eq("test") if "split" in df else pd.Series(False, index=df.index)
+    if "pool" in df:
+        held_out |= df["pool"].eq("B")
+    return held_out
+
+
 def assert_no_group_leakage(df: pd.DataFrame, fold: Fold) -> None:
     train = set(df["group"].iloc[fold.train_idx])
     val = set(df["group"].iloc[fold.val_idx])

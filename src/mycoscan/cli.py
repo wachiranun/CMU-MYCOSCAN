@@ -1,5 +1,5 @@
 """mycoscan command line: env | make-synthetic | build-openfungi | partition | seal | train | sweep | eval | explain |
-predict | compare | results | learning-curve."""
+predict | compare | paired | results | learning-curve | export-stage1 | score-review."""
 from __future__ import annotations
 
 import argparse
@@ -59,7 +59,14 @@ def _train(args) -> None:
     print(run_training(load_config(args.config, args.set)))
 
 
-METRIC_OPTIONS = {"label_map", "genus_map", "order_map", "subgroups"}
+def _export_stage1(args) -> None:
+    from .config import load_config
+    from .stage1 import export_stage1
+
+    print(export_stage1(load_config(args.config, args.set)))
+
+
+METRIC_OPTIONS = {"label_map", "genus_map", "order_map", "subgroups", "calibration_bins"}
 
 
 def _metric_options(path: str | None) -> dict:
@@ -79,24 +86,51 @@ def _eval(args) -> None:
 
     m = evaluate_checkpoint(args.checkpoint, args.manifest, args.out, args.modality, args.source, args.bootstrap,
                             args.device, **_metric_options(args.metric_config))
-    print(json.dumps({level: {k: m[level][k] for k in ("role", "accuracy", "top2_accuracy", "kappa", "macro")}
-                      for level in ("isolate_level", "image_level")}, indent=2))
+    print(json.dumps({"tau": m["tau"]["value"],
+                      **{level: {**{k: m[level][k] for k in ("role", "accuracy", "top2_accuracy", "kappa", "macro")},
+                                 "ece": m[level]["calibration"]["ece"],
+                                 "at_tau": m[level]["reject_option"].get("at_tau")}
+                         for level in ("isolate_level", "image_level")}}, indent=2))
 
 
 def _explain(args) -> None:
-    from .explain import explain_images
+    from .explain import explain_images, sample_for_review
     from .manifest import load_manifest
 
     labels = modalities = None
     images = args.images
+    if args.pool and not (args.manifest and args.splits_file):
+        raise ValueError("--pool names a pool of a splits file: pass --manifest and --splits-file with it")
     if args.manifest:
         df = load_manifest(args.manifest)
         if args.modality:
             df = df[df["modality"] == args.modality]
-        df = df.groupby("species", group_keys=False).head(args.per_class)
+        if args.splits_file:
+            from .splits import apply_splits, load_splits_file
+
+            splits = load_splits_file(args.splits_file, args.manifest)
+            df = apply_splits(df[df["group"].isin(splits["group"])], splits)
+        if args.pool:
+            in_pool = df["split"].eq(args.pool)  # dev or test of a sealed CMU file
+            if "pool" in df:
+                in_pool |= df["pool"].eq(args.pool)  # A or B of the OpenFungi partition
+            df = df[in_pool]
+            if df.empty:
+                raise ValueError(f"no images in pool {args.pool!r} of {args.splits_file}")
+        df = sample_for_review(df, args.per_class, args.seed)
         images, labels, modalities = df["image_path"].tolist(), df["species"].tolist(), df["modality"].tolist()
-    sheet = explain_images(args.checkpoint, images, args.out, args.device, labels, modalities)
-    print(f"{len(sheet)} panels and review_sheet.csv written to {args.out}")
+    sheet = explain_images(args.checkpoint, images, args.out, args.device, labels, modalities, args.reveal)
+    print(f"{len(sheet)} panels, review_sheet.csv and review_key.csv (keep it from the raters) written to {args.out}")
+
+
+def _score_review(args) -> None:
+    from .explain import score_review
+
+    scores = score_review(args.sheets)
+    text = json.dumps(scores, indent=2)
+    print(text)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
 
 
 def _predict(args) -> None:
@@ -124,6 +158,22 @@ def _compare(args) -> None:
                          **{f"macro_{k}": _with_ci(r["macro"][k], ci, f"macro_{k}")
                             for k in ("sensitivity", "specificity", "ppv", "npv", "f1", "auc")}})
     print(pd.DataFrame(rows).to_string(index=False))
+
+
+def _paired(args) -> None:
+    from .config import parse_override
+    from .paired import compare_runs, load_paired_config, write_comparison
+
+    cfg = load_paired_config(args.config, dict(parse_override(o) for o in args.set))
+    pairs = compare_runs(args.runs, cfg)
+    for r in pairs:
+        print(f"{r['sequential']} - {r['direct']} ({r['arch']}, {r['metric']}, {r['n_pairs']} fold x seed pairs): "
+              f"mean {100 * r['mean_difference']:+.1f} points, {cfg.ci_level:.0%} CI "
+              f"[{100 * r['ci'][0]:+.1f}, {100 * r['ci'][1]:+.1f}], Wilcoxon p = {r['wilcoxon_p']:.3g}")
+        print(f"  {r['verdict']}")
+        print(f"  recommendation: {r['recommendation']}")
+    if args.out:
+        print(write_comparison(pairs, cfg, args.out))
 
 
 def _sweep(args) -> None:
@@ -194,6 +244,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override a config key")
     p.set_defaults(fn=_train)
 
+    p = sub.add_parser("export-stage1", help="train on all of OpenFungi Pool A for one modality and write the "
+                                             "head-stripped Stage-1 checkpoint of_<micro|macro>_<arch>.pt")
+    p.add_argument("--config", required=True, help="the final recipe, with source = openfungi and a splits_file")
+    p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override a config key")
+    p.set_defaults(fn=_export_stage1)
+
     p = sub.add_parser("sweep", help="run every cell of a sweep file; exits 1 if any cell failed")
     p.add_argument("sweep")
     p.set_defaults(fn=_sweep)
@@ -206,10 +262,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--source", default="all", choices=["cmu", "openfungi", "all"])
     p.add_argument("--bootstrap", type=int, default=2000)
     p.add_argument("--device", default="auto")
-    p.add_argument("--metric-config", help="TOML with label_map, genus_map, order_map and subgroups")
+    p.add_argument("--metric-config", help="TOML with label_map, genus_map, order_map, subgroups and calibration_bins")
     p.set_defaults(fn=_eval)
 
-    p = sub.add_parser("explain", help="Grad-CAM and SmoothGrad panels plus an expert review sheet")
+    p = sub.add_parser("explain", help="Grad-CAM (CNN) or attention rollout (ViT) and SmoothGrad panels, plus a "
+                                       "blinded two-rater review sheet")
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--device", default="cpu")
@@ -217,8 +274,17 @@ def main(argv: list[str] | None = None) -> None:
     group.add_argument("--images", nargs="+")
     group.add_argument("--manifest")
     p.add_argument("--modality", choices=["colony", "microscopic"])
-    p.add_argument("--per-class", type=int, default=2)
+    p.add_argument("--splits-file", help="frozen splits file of the manifest, to sample from one --pool")
+    p.add_argument("--pool", help="sample only this pool or split of the splits file: A, B, dev or test")
+    p.add_argument("--per-class", type=int, default=2, help="images drawn at random per class (fewer if a class has fewer)")
+    p.add_argument("--seed", type=int, default=0, help="seed of the per-class draw")
+    p.add_argument("--reveal", action="store_true", help="show true labels and image paths in panels and sheet")
     p.set_defaults(fn=_explain)
+
+    p = sub.add_parser("score-review", help="percent structure-focused per rater and Cohen's kappa between raters")
+    p.add_argument("sheets", nargs="+", help="filled review_sheet.csv files, one per rater or one with both")
+    p.add_argument("--out", help="also write the scores to this JSON")
+    p.set_defaults(fn=_score_review)
 
     p = sub.add_parser("predict", help="class probabilities for one or more images")
     p.add_argument("--checkpoint", required=True)
@@ -229,6 +295,14 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("compare", help="side-by-side metrics of finished runs")
     p.add_argument("runs", nargs="+")
     p.set_defaults(fn=_compare)
+
+    p = sub.add_parser("paired", help="sequential vs direct transfer, paired by fold and seed, with the "
+                                      "pre-registered verdict and a negative-transfer check")
+    p.add_argument("runs", nargs="+", help="run directories; checkpoint-initialised runs are sequential")
+    p.add_argument("--config", help="TOML with min_gain, ci_level, require_ci_excludes_zero, bootstrap, seed")
+    p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override a comparison key")
+    p.add_argument("--out", help="write every pair, its differences and the thresholds to this JSON")
+    p.set_defaults(fn=_paired)
 
     p = sub.add_parser("results", help="one CSV row per run and one per config cell, from every metrics.json under a directory")
     p.add_argument("root")

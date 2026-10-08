@@ -25,6 +25,7 @@ PER_CLASS = ("sensitivity", "specificity", "ppv", "npv", "f1", "accuracy_ovr", "
 OVERALL = ("accuracy", "top2_accuracy", "kappa")
 Z95 = 1.959963984540054
 UNMAPPED = "unmapped"
+TAU_GRID = np.round(np.arange(0, 1.0001, 0.05), 2)  # thresholds of the reported accuracy-coverage curve
 
 
 def _ratio(num: float, den: float) -> float:
@@ -79,6 +80,34 @@ def cohen_kappa(cm: np.ndarray) -> float:
     return float(_ratio(observed - expected, 1 - expected)) if expected < 1 else float("nan")
 
 
+def expected_calibration_error(confidence: np.ndarray, correct: np.ndarray, n_bins: int = 10) -> dict:
+    """ECE over `n_bins` equal-width confidence bins, [lo, hi) and the last one closed, and the reliability
+    table behind it: per bin its count, mean confidence and accuracy (nan for an empty bin)."""
+    which = np.minimum((confidence * n_bins).astype(int), n_bins - 1)
+    bins, ece = [], 0.0
+    for b in range(n_bins):
+        inside = which == b
+        n = int(inside.sum())
+        conf = float(confidence[inside].mean()) if n else float("nan")
+        acc = float(correct[inside].mean()) if n else float("nan")
+        if n:
+            ece += n / len(confidence) * abs(acc - conf)
+        bins.append({"lo": b / n_bins, "hi": (b + 1) / n_bins, "n": n, "confidence": conf, "accuracy": acc})
+    return {"ece": ece if len(confidence) else float("nan"), "n_bins": n_bins, "bins": bins}
+
+
+def accuracy_coverage(confidence: np.ndarray, correct: np.ndarray, taus) -> list[dict]:
+    """The reject option at each threshold: a call is made when confidence >= tau, and "no call" otherwise.
+    Coverage is the share of calls made, accuracy that of calls made that are right (nan with no calls)."""
+    points = []
+    for tau in taus:
+        accepted = confidence >= tau
+        n = int(accepted.sum())
+        points.append({"tau": float(tau), "n_accepted": n, "coverage": _ratio(n, len(confidence)),
+                       "accuracy": float(correct[accepted].mean()) if n else float("nan")})
+    return points
+
+
 def classification_report(y_true: np.ndarray, probs: np.ndarray, classes: list[str]) -> dict:
     n = len(classes)
     y_pred = probs.argmax(axis=1)
@@ -129,10 +158,73 @@ def prob_columns(classes: list[str]) -> list[str]:
     return [f"prob_{c}" for c in classes]
 
 
-def aggregate_by_group(preds: pd.DataFrame, classes: list[str]) -> pd.DataFrame:
-    """Mean-probability vote over all images of a group (the isolate for CMU data)."""
+def aggregate_by_group(preds: pd.DataFrame, classes: list[str], pooling: str = "mean", key: str = "group") -> pd.DataFrame:
+    """One row per group (the isolate for CMU data), or per value of `key`, from its rows' probabilities: their
+    mean, or with `max` each class's highest probability over the rows, renormalised to sum to 1."""
     cols = prob_columns(classes)
-    return preds.groupby("group").agg({"species": "first", **{c: "mean" for c in cols}}).reset_index()
+    keep = {"species": "first", **({"group": "first"} if key != "group" else {})}
+    table = preds.groupby(key).agg({**keep, **{c: pooling for c in cols}}).reset_index()
+    if pooling == "max":
+        table[cols] = table[cols].div(table[cols].sum(axis=1), axis=0)
+    return table
+
+
+def split_levels(preds: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """A prediction table's image rows, and the rows its isolates are pooled from.
+
+    Without bag rows both are the image rows. With isolate or isolate-and-device bags (`level` image and bag),
+    isolates are pooled from the bag rows. With tile bags (`level` tile and bag) each bag is one image, so the
+    bag rows are the images, and isolates are pooled from them."""
+    if "level" not in preds:
+        return preds, preds
+    bags = preds[preds["level"] == "bag"]
+    if bags.empty:
+        return preds, preds
+    if (preds["level"] == "tile").any():
+        return bags, bags
+    return preds[preds["level"] == "image"], bags
+
+
+def isolate_table(preds: pd.DataFrame, classes: list[str], pooling: str = "mean") -> pd.DataFrame:
+    return aggregate_by_group(split_levels(preds)[1], classes, pooling)
+
+
+def _confidence_and_correct(table: pd.DataFrame, classes: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    probs = table[prob_columns(classes)].to_numpy()
+    y_true = table["species"].map({c: i for i, c in enumerate(classes)}).to_numpy()
+    return probs.max(axis=1), probs.argmax(axis=1) == y_true
+
+
+TAU_RULES = ("none", "min_accuracy", "min_coverage")
+
+
+def choose_tau(preds: pd.DataFrame, classes: list[str], rule: str, target: float, pooling: str = "mean") -> dict:
+    """The reject threshold tau from development predictions, by `rule`:
+
+    min_accuracy: the lowest tau whose accepted isolates are at least `target` accurate (the most coverage).
+    min_coverage: the highest tau that still makes a call on at least `target` of isolates.
+
+    Candidates are the isolates' own confidences, so tau is the confidence of the least confident accepted
+    development isolate. Refuses any sealed test or Pool B row: tau is never tuned where it is evaluated."""
+    from .splits import held_out_mask
+
+    held_out = held_out_mask(preds)
+    if held_out.any():
+        groups = sorted(set(preds.loc[held_out, "group"]))
+        raise ValueError(f"tau is tuned on development rows only, but {int(held_out.sum())} rows are sealed test "
+                         f"or Pool B, in groups {groups[:10]}")
+    if rule not in TAU_RULES[1:]:
+        raise ValueError(f"tau rule {rule!r}; expected one of {list(TAU_RULES[1:])}")
+    confidence, correct = _confidence_and_correct(isolate_table(preds, classes, pooling), classes)
+    candidates = accuracy_coverage(confidence, correct, np.unique(confidence))
+    key = "accuracy" if rule == "min_accuracy" else "coverage"
+    passing = [p for p in candidates if p[key] >= target]
+    record = {"rule": rule, "target": target, "pooling": pooling, "n_isolates": len(confidence),
+              "chosen_on": "development out-of-fold isolates"}
+    if not passing:
+        return {**record, "tau": None, "reason": f"no threshold reaches {key} {target} on development isolates"}
+    best = passing[0] if rule == "min_accuracy" else passing[-1]
+    return {**record, "tau": best["tau"], "coverage": best["coverage"], "accuracy": best["accuracy"]}
 
 
 def map_reference_labels(preds: pd.DataFrame, classes: list[str],
@@ -206,15 +298,30 @@ def _bootstrap(preds: pd.DataFrame, classes: list[str], n_boot: int, seed: int) 
     }
 
 
-def _level_reports(preds: pd.DataFrame, classes: list[str], n_boot: int, seed: int,
-                   genus_map: Mapping[str, str], order_map: Mapping[str, str]) -> dict:
+def reject_option(confidence: np.ndarray, correct: np.ndarray, tau: float | None) -> dict:
+    block: dict = {"curve": accuracy_coverage(confidence, correct, TAU_GRID)}
+    if tau is not None:
+        at = accuracy_coverage(confidence, correct, [tau])[0]
+        block["at_tau"] = {**at, "wilson95": wilson_interval(round(at["accuracy"] * at["n_accepted"]), at["n_accepted"])
+                           if at["n_accepted"] else [float("nan")] * 2}
+    return block
+
+
+def _level_reports(images: pd.DataFrame, units: pd.DataFrame, classes: list[str], n_boot: int, seed: int,
+                   genus_map: Mapping[str, str], order_map: Mapping[str, str], pooling: str, tau: float | None,
+                   calibration_bins: int) -> dict:
+    """Isolate level pools `units` by group; image level scores `images` as they are. tau, chosen on isolates,
+    is applied to the isolate level only."""
     class_idx = {c: i for i, c in enumerate(classes)}
     cols = prob_columns(classes)
     result = {}
-    for level, table, role in (("isolate_level", aggregate_by_group(preds, classes), "primary"),
-                               ("image_level", preds, "secondary")):
+    for level, table, role, level_tau in (("isolate_level", aggregate_by_group(units, classes, pooling), "primary", tau),
+                                          ("image_level", images, "secondary", None)):
         y_true, probs = table["species"].map(class_idx).to_numpy(), table[cols].to_numpy()
         report = {"role": role, **classification_report(y_true, probs, classes)}
+        confidence, correct = _confidence_and_correct(table, classes)
+        report["calibration"] = expected_calibration_error(confidence, correct, calibration_bins)
+        report["reject_option"] = reject_option(confidence, correct, level_tau)
         if genus_map:
             report["genus_level"] = rollup_accuracy(y_true, probs.argmax(axis=1), classes, genus_map)
             if order_map:
@@ -237,12 +344,18 @@ def _check_taxonomy(classes: list[str], genus_map: Mapping[str, str], order_map:
 
 def evaluate_predictions(preds: pd.DataFrame, classes: list[str], n_boot: int = 2000, seed: int = 0,
                          genus_map: Mapping[str, str] | None = None, order_map: Mapping[str, str] | None = None,
-                         subgroups: Sequence[str] = (), label_map: Mapping[str, Sequence[str]] | None = None) -> dict:
-    """preds: one row per image with species, group and prob_<class> columns.
+                         subgroups: Sequence[str] = (), label_map: Mapping[str, Sequence[str]] | None = None,
+                         pooling: str = "mean", tau: float | None = None, calibration_bins: int = 10) -> dict:
+    """preds: one row per image with species, group and prob_<class> columns, and with bags also one row
+    per bag, told apart by a `level` column (see split_levels).
 
     genus_map / order_map: species -> genus and genus -> order for taxonomic rollups.
-    subgroups: columns of `preds` (e.g. device, phase); the same report is repeated per value.
+    subgroups: columns of `preds` (e.g. device, phase); the same report is repeated per value, with
+        isolates pooled from the subgroup's own images as the headline pools them (through their bags first).
     label_map: reference label -> model classes, for an external set with coarser labels.
+    pooling: mean | max, how a group's rows become its isolate prediction.
+    tau: reject threshold; each level then reports accuracy and coverage at it (tau is never tuned here).
+    calibration_bins: equal-width confidence bins of the ECE and reliability table.
     """
     result: dict = {}
     if label_map:
@@ -255,14 +368,21 @@ def evaluate_predictions(preds: pd.DataFrame, classes: list[str], n_boot: int = 
     if why_not:
         result["taxonomic_rollup_skipped"] = why_not
         genus, order = {}, {}
-    result.update(_level_reports(preds, classes, n_boot, seed, genus, order))
+    images, units = split_levels(preds)
+    through_bags = units is not images  # image and bag rows: pool a subgroup's images by bag, then by isolate
+
+    def reports(images: pd.DataFrame, units: pd.DataFrame) -> dict:
+        return _level_reports(images, units, classes, n_boot, seed, genus, order, pooling, tau, calibration_bins)
+
+    result.update(reports(images, units))
     missing = [c for c in subgroups if c not in preds]
     if missing:
         raise ValueError(f"subgroup columns not in the prediction table: {missing}")
     if subgroups:
         result["subgroups"] = {
-            col: {str(value): {"n_images": len(rows), **_level_reports(rows, classes, n_boot, seed, genus, order)}
-                  for value, rows in preds.groupby(col, dropna=False)}
+            col: {str(value): {"n_images": len(rows),
+                               **reports(rows, aggregate_by_group(rows, classes, pooling, "bag") if through_bags else rows)}
+                  for value, rows in images.groupby(col, dropna=False)}
             for col in subgroups
         }
     return result

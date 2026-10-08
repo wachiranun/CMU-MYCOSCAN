@@ -11,6 +11,7 @@ pigment of Talaromyces marneffei on the reverse of the colony).
 from __future__ import annotations
 
 import random
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -108,6 +109,26 @@ def load_image(source: Image.Image | str | Path, plate_crop: bool, modality: str
         with Image.open(source) as img:
             rgb = to_rgb(img)
     return plate_circle_crop(rgb) if plate_crop and modality == "colony" else rgb
+
+
+@dataclass(frozen=True)
+class TileSpec:
+    """A grid of `columns` x `rows` square tiles of `size` pixels cut from one image."""
+    columns: int
+    rows: int
+    size: int
+
+    @property
+    def count(self) -> int:
+        return self.columns * self.rows
+
+
+def tile_crop(img: Image.Image, spec: TileSpec, k: int) -> Image.Image:
+    """Tile k (row-major) of the image resized to columns*size by rows*size. A 3 x 2 grid fits the 3:2 frame
+    of a camera; an image of another aspect ratio is stretched to the grid."""
+    whole = img.resize((spec.columns * spec.size, spec.rows * spec.size), Image.Resampling.BILINEAR)
+    row, col = divmod(k, spec.columns)
+    return whole.crop((col * spec.size, row * spec.size, (col + 1) * spec.size, (row + 1) * spec.size))
 
 
 def build_transform(image_size: int, autocontrast: bool, train: bool, augmentation: str = "standard") -> T.Compose:

@@ -1,0 +1,15 @@
+# P10: the Stage-1 checkpoint Plan 2 starts from. Put the backbone and recipe chosen in P1-P5 here, then
+#   mycoscan export-stage1 --config configs/openfungi_stage1_micro.toml                       # of_micro_<arch>.pt
+#   mycoscan export-stage1 --config configs/openfungi_stage1_micro.toml --set modality=colony  # of_macro_<arch>.pt
+# It trains on every Pool A image of the modality (the splits file holds Pool B out) and writes the
+# head-stripped checkpoint and its provenance to runs/stage1/. A Stage-2 config names that file as `weights`.
+run_name = "of_stage1_micro"
+manifest = "data/openfungi/manifest.csv"
+splits_file = "data/openfungi/splits_v1.csv"
+source = "openfungi"
+modality = "microscopic"
+arch = "convnext_tiny"
+weights = "imagenet"
+finetune = "partial"
+epochs = 20
+lr = 3e-4

@@ -19,6 +19,8 @@ import timm
 import torch
 from torch import nn
 
+from . import smallcnn  # noqa: F401  registers arch "small_cnn" with timm
+
 PRETRAINED = ("imagenet", "imagenet22k", "dino")
 # The two archs of the torchvision era keep the exact ImageNet weights they were trained from.
 TORCHVISION_TAGS = {"densenet121": "tv_in1k", "resnet50": "tv2_in1k"}
@@ -84,6 +86,11 @@ def _create(name: str, pretrained: bool, n_classes: int, image_size: int) -> nn.
         return timm.create_model(name, pretrained=pretrained, num_classes=n_classes)
 
 
+def is_checkpoint(weights: str) -> bool:
+    """True when `weights` names an earlier stage's checkpoint rather than an initialisation."""
+    return weights not in (*PRETRAINED, "none")
+
+
 def build_model(arch: str, n_classes: int, weights: str, image_size: int = 224) -> nn.Module:
     """weights: imagenet, imagenet22k, dino, none, or a path to an earlier-stage checkpoint (backbone is reused)."""
     pretrained = weights in PRETRAINED
@@ -91,15 +98,24 @@ def build_model(arch: str, n_classes: int, weights: str, image_size: int = 224) 
     head = adapter(model).head
     in_features = cast(nn.Linear, model.get_submodule(head)).in_features
     model.set_submodule(head, nn.Sequential(nn.Dropout(0.3), nn.Linear(in_features, n_classes)))
-    if weights not in PRETRAINED and weights != "none":
-        ckpt = torch.load(weights, map_location="cpu", weights_only=False)
-        if ckpt["arch"] != arch:
-            raise ValueError(f"checkpoint {weights} is {ckpt['arch']}, config asks for {arch}")
-        backbone = {k: v for k, v in ckpt["state_dict"].items() if not k.startswith(head + ".")}
-        missing, unexpected = model.load_state_dict(backbone, strict=False)
-        if unexpected or any(not k.startswith(head + ".") for k in missing):
-            raise ValueError(f"checkpoint {weights} does not match {arch}: missing={missing[:3]} unexpected={unexpected[:3]}")
+    if is_checkpoint(weights):
+        load_backbone(model, weights, arch)
     return model
+
+
+def load_backbone(model: nn.Module, checkpoint: str | Path, arch: str) -> dict:
+    """Load an earlier stage's backbone into `model`, its head left newly initialised. Refuses a checkpoint of
+    another arch, and one whose loading would leave anything but head parameters new. Returns the parameters
+    newly initialised and the earlier stage's provenance (None for a checkpoint that carries none)."""
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    if ckpt["arch"] != arch:
+        raise ValueError(f"checkpoint {checkpoint} is {ckpt['arch']}, config asks for {arch}")
+    head = adapter(model).head
+    backbone = {k: v for k, v in ckpt["state_dict"].items() if not k.startswith(head + ".")}
+    missing, unexpected = model.load_state_dict(backbone, strict=False)
+    if unexpected or any(not k.startswith(head + ".") for k in missing):
+        raise ValueError(f"checkpoint {checkpoint} does not match {arch}: missing={missing[:3]} unexpected={unexpected[:3]}")
+    return {"newly_initialised": list(missing), "provenance": ckpt.get("provenance")}
 
 
 def _block_ends(a: Adapter, names: list[str]) -> list[int]:
@@ -190,6 +206,12 @@ def save_checkpoint(path: Path, model: nn.Module, arch_name: str, classes: list[
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"state_dict": model.state_dict(), "arch": arch_name, "classes": classes,
                 "image_size": image_size, "autocontrast": autocontrast, **extra}, path)
+
+
+def add_to_checkpoint(path: Path, **fields) -> None:
+    """Record fields known only after a checkpoint was saved (the reject threshold) in it."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    torch.save({**ckpt, **fields}, path)
 
 
 def load_checkpoint(path: str | Path, device: str = "cpu") -> tuple[nn.Module, dict]:

@@ -216,3 +216,28 @@ def make_openfungi_folders(out_dir: str | Path, size: int = 96, plates_per_class
                 for s, shot in enumerate(shots):
                     shot.save(folder / f"{name}_plate{p}_shot{s}.jpg", quality=95)
     return root
+
+
+def make_planted_duplicates(out_dir: str | Path, groups_per_class: int = 6, shots: int = 3, n_classes: int = 2,
+                            size: int = 64, seed: int = 0) -> Path:
+    """An OpenFungi-style manifest where only near-duplicates carry information: each group is a random
+    texture shot `shots` times (reframed and re-exposed), and its class is unrelated to its content. A model
+    can score above chance only by recognising a shot of a group it was trained on, which a grouped split
+    forbids and the leaky image-level split allows, so the gap between them is pure leakage inflation."""
+    out = Path(out_dir)
+    (out / "images").mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    rows = []
+    for c in range(n_classes):
+        for g in range(groups_per_class):
+            group = f"PD_c{c}_g{g:02d}"
+            texture = rng.integers(0, 256, (size // 2, size // 2, 3), dtype=np.uint8)
+            base = Image.fromarray(texture).resize((size, size), Image.Resampling.NEAREST)
+            for s, img in enumerate([base] + [near_duplicate(base, rng, reframe=48) for _ in range(shots - 1)]):
+                name = f"{group}_shot{s}.png"
+                img.save(out / "images" / name)
+                rows.append({"image_path": f"images/{name}", "species": f"class{c}", "isolate_id": "",
+                             "group_id": group, "modality": "microscopic", "source": "openfungi"})
+    manifest = out / "manifest.csv"
+    pd.DataFrame(rows).to_csv(manifest, index=False)
+    return manifest

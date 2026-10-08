@@ -1,0 +1,18 @@
+# P0, controlled: the OpenFungi paper's experiment (a small CNN from scratch at 128 px) under grouped
+# cross-validation inside Pool A, so repeated shots of one plate never sit on both sides of a fold.
+# Read it beside p0_small_cnn_micro_leaky.toml: `mycoscan results runs --out runs/table.csv` lists the two
+# runs together, and the gap between them is the leakage inflation of the paper's number.
+run_name = "p0_small_cnn_micro_grouped"
+manifest = "data/openfungi/manifest.csv"
+splits_file = "data/openfungi/splits_v1.csv"
+source = "openfungi"
+modality = "microscopic"
+arch = "small_cnn"
+weights = "none"
+finetune = "full"
+image_size = 128
+split = "kfold"
+n_folds = 5
+epochs = 30
+batch_size = 32
+lr = 1e-3

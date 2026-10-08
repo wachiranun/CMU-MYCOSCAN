@@ -52,6 +52,8 @@ def load_manifest(path: str | Path, allow_ungrouped: bool = False) -> pd.DataFra
     Only the leaky `image_random` comparison split passes it; grouped splits must refuse them."""
     path = Path(path)
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    if "level" in df.columns:  # a prediction table loads as a manifest of its images
+        df = df[(df["level"] != "tile") & (df["image_path"] != "")].reset_index(drop=True)
     missing = [c for c in REQUIRED if c not in df.columns]
     if missing:
         raise ValueError(f"{path}: missing columns {missing}")

@@ -5,6 +5,8 @@ import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
+from .bags import BAG_MODES, POOLINGS
+from .metrics import TAU_RULES
 from .models import PRETRAINED, resolve_weights
 
 CHOICES = {
@@ -16,6 +18,9 @@ CHOICES = {
     "augmentation": {"none", "standard", "trivial_wide"},
     "tracking": {"none", "mlflow"},
     "split": {"holdout", "kfold", "loio", "image_random"},
+    "tau_rule": set(TAU_RULES),
+    "bag": set(BAG_MODES),
+    "pooling": set(POOLINGS),
 }
 SUBGROUP_COLUMNS = {"modality", "view", "device", "day", "source", "genus", "temperature", "phase", "z_index"}
 
@@ -45,6 +50,10 @@ class Config:
     label_smoothing: float = 0.0
     augmentation: str = "standard"
     plate_crop: bool = False
+    bag: str = "none"
+    pooling: str = "mean"
+    tile_grid: tuple[int, ...] = (3, 2)
+    tile_size: int = 640
     split: str = "kfold"
     splits_file: str = ""
     n_folds: int = 5
@@ -63,6 +72,9 @@ class Config:
     genus_map: dict = field(default_factory=dict)
     order_map: dict = field(default_factory=dict)
     subgroups: tuple[str, ...] = ()
+    calibration_bins: int = 10
+    tau_rule: str = "min_accuracy"
+    tau_target: float = 0.9
     amp: bool = False
     grad_clip: float = 0.0
     tracking: str = "none"
@@ -91,6 +103,18 @@ class Config:
         bad = sorted(set(self.subgroups) - SUBGROUP_COLUMNS)
         if bad:
             raise ValueError(f"config subgroups {bad} are not manifest columns; expected some of {sorted(SUBGROUP_COLUMNS)}")
+        if len(self.tile_grid) != 2 or min(self.tile_grid) < 1 or self.tile_size < 1:
+            raise ValueError("config tile_grid must be [columns, rows] of positive integers and tile_size positive")
+        if self.bag != "none" and self.split == "image_random":
+            raise ValueError("config split='image_random' scatters a group's images over folds, so bags "
+                             "(always inside one group) would straddle them; use bag='none'")
+        if self.bag != "none" and self.finetune == "linear_probe":
+            raise ValueError("config bag pools a network's instance predictions; finetune='linear_probe' "
+                             "scores isolates by the mean of its images, so use bag='none'")
+        if self.calibration_bins < 1:
+            raise ValueError("config calibration_bins must be >= 1")
+        if not 0 < self.tau_target <= 1:
+            raise ValueError("config tau_target must be in (0, 1]")
         if not 0 < self.val_fraction < 1:
             raise ValueError("config val_fraction must be in (0, 1)")
         if not 0 < self.train_fraction <= 1:
@@ -115,7 +139,7 @@ def _coerce(raw: dict) -> dict:
     unknown = set(raw) - known
     if unknown:
         raise ValueError(f"unknown config keys: {sorted(unknown)}")
-    for key in ("classes", "select_classes", "subgroups", "seeds"):
+    for key in ("classes", "select_classes", "subgroups", "seeds", "tile_grid"):
         if key in raw:
             raw = {**raw, key: tuple(raw[key])}
     return raw
