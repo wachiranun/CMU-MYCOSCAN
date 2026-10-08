@@ -22,7 +22,7 @@ mycoscan env                      # prints torch version and whether CUDA is vis
 
 `device = "auto"` in a config uses the GPU when one is visible and the CPU otherwise.
 
-To run on the CMU HPC ERAWAN cluster with Slurm, open [docs/runbook-hpc-slurm.html](docs/runbook-hpc-slurm.html) in a browser.
+To run on the CMU HPC ERAWAN cluster with Slurm, see [docs/runbook-hpc-slurm.md](docs/runbook-hpc-slurm.md) (also as [HTML](docs/runbook-hpc-slurm.html)).
 
 ## Prepare a manifest
 
