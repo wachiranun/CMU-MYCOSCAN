@@ -19,7 +19,7 @@ import torch
 from torch import nn
 from torch.optim.swa_utils import AveragedModel
 
-from .bags import assert_no_bag_leakage, bag_frame, instances, predict_bags, with_bag_ids
+from .bags import assert_no_bag_leakage, bag_frame, checkpoint_tiles, instances, predict_bags, with_bag_ids
 from .config import Config
 from .data import make_loader, refuse_held_out
 from .features import cache_key, cached_features
@@ -27,6 +27,7 @@ from .losses import build_loss
 from .manifest import load_manifest, select
 from .metrics import choose_tau, evaluate_predictions, prob_columns
 from .mil import ATTENTION_POOLINGS, MILModel, attention_sidecars, attention_summary, predict_mil, training_batches
+from .modelcard import write_model_card
 from .models import (add_lora, add_to_checkpoint, apply_finetune, build_model, is_checkpoint, load_backbone,
                      load_checkpoint, lr_scales, merge_lora, require_peft, save_checkpoint, train_mode)
 from .probe import Probes, fit_probes, with_linear_head
@@ -199,10 +200,8 @@ class Scoring:
 
     @classmethod
     def of_checkpoint(cls, meta: dict) -> Scoring:
-        bag = meta.get("bag", "none")
-        tiles = TileSpec(*meta["tile_grid"], meta["tile_size"]) if bag == "tiles" else None
-        return cls(meta["image_size"], meta["autocontrast"], meta.get("plate_crop", False), bag,
-                   meta.get("pooling", "mean"), tiles)
+        return cls(meta["image_size"], meta["autocontrast"], meta.get("plate_crop", False), meta.get("bag", "none"),
+                   meta.get("pooling", "mean"), checkpoint_tiles(meta))
 
 
 def tile_spec(cfg: Config) -> TileSpec | None:
@@ -411,6 +410,7 @@ def run_training(cfg: Config) -> Path:
     # Folds come from `seed` alone; each entry of `seeds` changes initialisation and sampling, never the split.
     seeds = list(cfg.seeds) or [cfg.seed]
     provenance |= {"seeds": seeds, "folds": fold_record(df, folds)}
+    meta["provenance"] = provenance
     metric_options = dict(genus_map=genus_map_of(df, cfg.genus_map), order_map=cfg.order_map, subgroups=cfg.subgroups,
                           pooling=cfg.pooling, calibration_bins=cfg.calibration_bins)
     base = {"run_name": cfg.run_name, "cell": cfg.run_name, "split": cfg.split, "leaky": leaky,
@@ -460,7 +460,7 @@ def run_training(cfg: Config) -> Path:
     tau = tau_from_development(cfg, [f["table"].assign(seed=f["seed"]) for f in folds_done], classes)
     base["tau"] = tau
     metric_options["tau"] = tau["value"]
-    fold_scores, pooled = [], {}
+    fold_scores, pooled, seed_metrics = [], {}, {}
     if not holdout:
         for f in folds_done:
             fold_metrics = {**base, "seed": f["seed"], "fold": f["fold"], "resources": f["resources"],
@@ -477,9 +477,11 @@ def run_training(cfg: Config) -> Path:
                                {**base, **attention, "seed": seed, "fold": "holdout" if holdout else "pooled",
                                 "resources": total_cost(run["costs"]), "folds": fold_info,
                                 "train_history": run["histories"], "note": note}, **metric_options)
+        seed_metrics[seed] = metrics
         if holdout:
             fold_scores.append(metrics)
             add_to_checkpoint(seed_dir / "model.pt", tau=tau["value"], tau_selection=tau.get("selection"))
+            write_model_card(seed_dir / "model.pt", metrics)
         pooled[seed] = seed_dir / "predictions.csv"
         if cfg.tracking == "mlflow":
             log_to_mlflow(seed_dir, cfg.run_name + (f"/seed{seed}" if cfg.seeds else ""), metrics)
@@ -487,7 +489,7 @@ def run_training(cfg: Config) -> Path:
                  "[leaky, comparison only] " if leaky else "", seed,
                  metrics["image_level"]["accuracy"], metrics["image_level"]["macro"]["f1"],
                  metrics["isolate_level"]["accuracy"], metrics["isolate_level"]["macro"]["f1"])
-    write_summary(run_dir, base, fold_scores, pooled)
+    summary = write_summary(run_dir, base, fold_scores, pooled)
     if not holdout and cfg.fit_final:
         log.info("final model on all %d groups", df["group"].nunique())
         if probe:
@@ -496,6 +498,7 @@ def run_training(cfg: Config) -> Path:
             model, _ = fit_model(df, cfg, classes, device, cfg.seed)
         save_checkpoint(run_dir / "model.pt", model, cfg.arch, classes, cfg.image_size, cfg.autocontrast,
                         {**meta, "fold": "all", "tau": tau["value"], "tau_selection": tau.get("selection")})
+        write_model_card(run_dir / "model.pt", seed_metrics.get(cfg.seed, seed_metrics[seeds[0]]), summary)
     log.info("done in %.0fs -> %s", time.time() - started, run_dir)
     return run_dir
 

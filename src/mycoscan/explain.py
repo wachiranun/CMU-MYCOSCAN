@@ -16,6 +16,7 @@ Cohen's kappa between the raters.
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -27,17 +28,21 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from torch import nn
 from torchvision import transforms as T
 
+from .bags import checkpoint_tiles, instances
 from .metrics import cohen_kappa
-from .mil import ATTENTION_POOLINGS
+from .mil import MILModel, predict_mil
 from .models import adapter, load_checkpoint
-from .transforms import build_transform, load_image
+from .transforms import build_transform, load_image, tile_crop
+
+log = logging.getLogger("mycoscan")
 
 FOCUS_SCALE = ("structure", "partial", "background")
 RATERS = ("rater1", "rater2")
-REVIEW_COLUMNS = ("panel", "method", "predicted", "probability", "true_species", "image_path",
+REVIEW_COLUMNS = ("panel", "level", "method", "predicted", "probability", "true_species", "image_path",
                   *(f"{r}_{field}" for r in RATERS for field in ("focus", "notes")))
 
 
@@ -125,37 +130,76 @@ def overlay(rgb: np.ndarray, heat: np.ndarray, alpha: float = 0.45) -> np.ndarra
 
 
 METHOD_TITLES = {"gradcam": "Grad-CAM", "attention_rollout": "Attention rollout"}
+BAG_INSTANCES = 8  # instances drawn in a bag panel, highest weight first
+BAG_HEATMAPS = 3  # of those, how many get a heat-map
+KEY_COLUMNS = ("panel", "level", "bag", "image_path", "attention", "true_species")
+
+
+def _heatmapper(net: nn.Module, encoder: nn.Module):
+    """The map method for `net` (its encoder for an attention-MIL model) and a function (x, target) -> map."""
+    if is_vit(encoder):
+        return "attention_rollout", lambda x, _target: attention_rollout(encoder, x)
+    layer = encoder.get_submodule(adapter(encoder).cam_layer)
+    return "gradcam", lambda x, target: gradcam(net, layer, x, target)
+
+
+def _save_panel(fig, path: Path, titles: list[str]) -> None:
+    fig.tight_layout()
+    fig.savefig(path, dpi=110, metadata={"Title": " | ".join(titles)})
+    plt.close(fig)
 
 
 def explain_images(checkpoint: str | Path, images: list[str], out_dir: str | Path, device: str = "cpu",
                    true_labels: list[str] | None = None, modalities: list[str] | None = None,
-                   reveal: bool = False) -> pd.DataFrame:
+                   reveal: bool = False, bags: list[str] | None = None,
+                   devices: list[str] | None = None) -> pd.DataFrame:
     """Panels, review_sheet.csv and review_key.csv for `images`. True labels and image paths reach the sheet
     and the panel titles only with `reveal`. modalities: one per image, for the plate crop; defaults to the
-    checkpoint's modality."""
+    checkpoint's modality.
+
+    An attention-MIL checkpoint gets one panel per bag (`level = "bag"` rows): its instances ordered by
+    attention weight, each with its weight, and a heat-map of the top instances for the bag's call, each
+    instance scored alone. bags: each image's bag (by default all images form one bag; a tile checkpoint
+    bags each image's tiles); devices: each image's device, for a device-then-isolate model, whose weights
+    shown are each instance's share of the isolate (its weight in its device times the device's weight).
+    Any other checkpoint gets one panel per image (`level = "image"` rows)."""
     model, meta = load_checkpoint(checkpoint, device)
-    if meta.get("pooling") in ATTENTION_POOLINGS:
-        raise ValueError(f"{checkpoint} is an attention-MIL model; its per-instance attention weights are in the "
-                         "run's attention.csv, and Grad-CAM explains single-image networks only")
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    true_labels = true_labels or [""] * len(images)
+    modalities = modalities or [meta.get("modality", "")] * len(images)
+    if isinstance(model, MILModel):
+        rows, key = _bag_panels(model, meta, images, out_dir, device, true_labels, modalities, reveal, bags, devices)
+    else:
+        if bags is not None or meta.get("bag", "none") != "none":
+            log.info("%s pools its bags by a fixed %s of instance predictions, not learned attention, so there are no "
+                     "instance weights to show: no bag panel, each image is explained alone",
+                     checkpoint, meta.get("pooling", "mean"))
+        rows, key = _image_panels(model, meta, images, out_dir, device, true_labels, modalities, reveal)
+    sheet = pd.DataFrame(rows).reindex(columns=list(REVIEW_COLUMNS), fill_value="")
+    sheet.to_csv(out_dir / "review_sheet.csv", index=False)
+    pd.DataFrame(key).reindex(columns=list(KEY_COLUMNS), fill_value="").to_csv(out_dir / "review_key.csv", index=False)
+    return sheet
+
+
+def _image_panels(model: nn.Module, meta: dict, images: list[str], out_dir: Path, device: str, true_labels: list[str],
+                  modalities: list[str], reveal: bool) -> tuple[list[dict], list[dict]]:
     classes = meta["classes"]
-    method = "attention_rollout" if is_vit(model) else "gradcam"
-    layer = None if method == "attention_rollout" else model.get_submodule(adapter(model).cam_layer)
+    method, heatmap = _heatmapper(model, model)
     tf = build_transform(meta["image_size"], meta["autocontrast"], train=False)
     size = meta["image_size"]
     view = T.Compose([T.Resize(size), T.CenterCrop(size)])
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     rows, key = [], []
     for i, path in enumerate(images):
-        img = load_image(path, meta.get("plate_crop", False), modalities[i] if modalities else meta.get("modality", ""))
+        img = load_image(path, meta.get("plate_crop", False), modalities[i])
         x = tf(img).unsqueeze(0).to(device)
         rgb = np.asarray(view(img), dtype=float)
         with torch.no_grad():
             probs = model(x).softmax(dim=1)[0].cpu().numpy()
         target = int(probs.argmax())
-        heat = attention_rollout(model, x) if layer is None else gradcam(model, layer, x, target)
+        heat = heatmap(x, target)
         sal = smoothgrad(model, x, target)
-        true = true_labels[i] if true_labels else ""
+        true = true_labels[i]
         panel = f"{i:04d}.png"
         titles = [f"image {i:04d}" + (f" (true: {true})" if reveal and true else ""),
                   f"{METHOD_TITLES[method]}: {classes[target]} p={probs[target]:.2f}", "SmoothGrad saliency"]
@@ -167,17 +211,73 @@ def explain_images(checkpoint: str | Path, images: list[str], out_dir: str | Pat
         for ax, title in zip(axes, titles):
             ax.set_title(title, fontsize=9)
             ax.axis("off")
-        fig.tight_layout()
-        fig.savefig(out_dir / panel, dpi=110, metadata={"Title": " | ".join(titles)})
-        plt.close(fig)
-        rows.append({"panel": panel, "method": method, "predicted": classes[target],
+        _save_panel(fig, out_dir / panel, titles)
+        rows.append({"panel": panel, "level": "image", "method": method, "predicted": classes[target],
                      "probability": round(float(probs[target]), 4), "true_species": true if reveal else "",
                      "image_path": path if reveal else ""})
-        key.append({"panel": panel, "image_path": path, "true_species": true})
-    sheet = pd.DataFrame(rows).reindex(columns=list(REVIEW_COLUMNS), fill_value="")
-    sheet.to_csv(out_dir / "review_sheet.csv", index=False)
-    pd.DataFrame(key).to_csv(out_dir / "review_key.csv", index=False)
-    return sheet
+        key.append({"panel": panel, "level": "image", "image_path": path, "true_species": true})
+    return rows, key
+
+
+def _bag_panels(model: MILModel, meta: dict, images: list[str], out_dir: Path, device: str, true_labels: list[str],
+                modalities: list[str], reveal: bool, bags: list[str] | None,
+                devices: list[str] | None) -> tuple[list[dict], list[dict]]:
+    classes = meta["classes"]
+    method, heatmap = _heatmapper(model, model.encoder)
+    tiles = checkpoint_tiles(meta)
+    plate_crop = meta.get("plate_crop", False)
+    tf = build_transform(meta["image_size"], meta["autocontrast"], train=False)
+    size = meta["image_size"]
+    view = T.Compose([T.Resize(size), T.CenterCrop(size)])
+    frame = pd.DataFrame({"image_path": images, "modality": modalities, "species": true_labels,
+                          "bag": bags or ["bag"] * len(images), "device": devices or ["device"] * len(images)})
+    if tiles:
+        frame = instances(frame.drop(columns="bag"), "tiles", tiles)
+    preds = predict_mil(model, frame, tf, device, 32, plate_crop, tiles)
+    weight = preds.instance_weights.mean(axis=1)  # heads averaged
+    if preds.device_names is not None and preds.device_weights is not None:
+        of_device = dict(zip(preds.device_names, preds.device_weights))
+        weight = weight * (frame["bag"].astype(str) + "|" + frame["device"].astype(str)).map(of_device).to_numpy()
+    names = frame["image_path"] + (("#tile" + frame["tile"].astype(str)) if tiles else "")
+    rows, key = [], []
+    for b, bag in enumerate(preds.names):
+        positions = np.flatnonzero(frame["bag"].to_numpy() == bag)
+        order = positions[np.argsort(-weight[positions], kind="stable")]
+        probs = preds.bag_probs[b]
+        target = int(probs.argmax())
+        true = frame["species"].iat[order[0]]
+        panel = f"bag_{b:04d}.png"
+        shown = order[:BAG_INSTANCES]
+        more = f" (+{len(order) - len(shown)} more)" if len(order) > len(shown) else ""
+        titles = [f"bag {b:04d}" + (f" (true: {true})" if reveal and true else "")
+                  + f": {classes[target]} p={probs[target]:.2f}, {len(order)} instances{more}",
+                  *(f"#{rank + 1} w={weight[p]:.3f}" for rank, p in enumerate(shown))]
+
+        fig, axes = plt.subplots(2, len(shown), figsize=(2.6 * len(shown) + 0.6, 5.8), squeeze=False)
+        loaded: dict[str, Image.Image] = {}
+        for rank, p in enumerate(shown):
+            row = frame.iloc[p]
+            if row["image_path"] not in loaded:
+                loaded[row["image_path"]] = load_image(row["image_path"], plate_crop, row["modality"])
+            img = loaded[row["image_path"]]
+            img = tile_crop(img, tiles, int(row["tile"])) if tiles else img
+            rgb = np.asarray(view(img), dtype=float)
+            axes[0, rank].imshow(rgb.astype(np.uint8))
+            axes[0, rank].set_title(titles[rank + 1], fontsize=9)
+            if rank < BAG_HEATMAPS:
+                axes[1, rank].imshow(overlay(rgb, heatmap(tf(img).unsqueeze(0).to(device), target)))
+                axes[1, rank].set_title(METHOD_TITLES[method], fontsize=9)
+        for ax in axes.flat:
+            ax.axis("off")
+        fig.suptitle(titles[0], fontsize=10)
+        _save_panel(fig, out_dir / panel, titles)
+        ordered = ";".join(names.iloc[order])
+        rows.append({"panel": panel, "level": "bag", "method": method, "predicted": classes[target],
+                     "probability": round(float(probs[target]), 4), "true_species": true if reveal else "",
+                     "image_path": ordered if reveal else ""})
+        key.append({"panel": panel, "level": "bag", "bag": bag, "image_path": ordered,
+                    "attention": ";".join(f"{weight[p]:.6f}" for p in order), "true_species": true})
+    return rows, key
 
 
 def sample_for_review(df: pd.DataFrame, per_class: int, seed: int = 0) -> pd.DataFrame:

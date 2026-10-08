@@ -214,6 +214,13 @@ def add_to_checkpoint(path: Path, **fields) -> None:
     torch.save({**ckpt, **fields}, path)
 
 
+def read_metadata(path: str | Path) -> dict:
+    """A checkpoint's metadata (classes, modality, pooling, tau, provenance, ...): all of it but the state dict."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    ckpt.pop("state_dict")
+    return ckpt
+
+
 def load_checkpoint(path: str | Path, device: str = "cpu") -> tuple[nn.Module, dict]:
     """The saved model and its metadata; an attention-MIL checkpoint comes back as its MILModel."""
     from .mil import ATTENTION_POOLINGS, MILModel

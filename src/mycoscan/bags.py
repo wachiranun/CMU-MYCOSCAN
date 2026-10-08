@@ -26,6 +26,11 @@ BAG_MODES = ("none", "isolate", "isolate_device", "tiles")
 POOLINGS = ("mean", "max")
 
 
+def checkpoint_tiles(meta: dict) -> TileSpec | None:
+    """The tile grid a checkpoint's bags are cut with: a TileSpec for `bag = "tiles"`, else None."""
+    return TileSpec(*meta["tile_grid"], meta["tile_size"]) if meta.get("bag", "none") == "tiles" else None
+
+
 def pool(x: torch.Tensor, mask: torch.Tensor, how: str) -> tuple[torch.Tensor, torch.Tensor]:
     """x (bags, instances, features) and mask (bags, instances) -> pooled (bags, features) and each
     instance's weight (bags, instances): 1/n for mean, for max the share of features the instance supplied.

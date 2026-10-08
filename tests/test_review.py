@@ -1,4 +1,5 @@
 import json
+import logging
 
 import pandas as pd
 import pytest
@@ -8,7 +9,9 @@ from PIL import Image
 from mycoscan.cli import main
 from mycoscan.explain import (REVIEW_COLUMNS, attention_rollout, explain_images, sample_for_review, score_review)
 from mycoscan.manifest import load_manifest, select
-from mycoscan.models import build_model, save_checkpoint
+from mycoscan.mil import MILModel
+from mycoscan.models import build_model, load_checkpoint, save_checkpoint
+from mycoscan.transforms import build_transform, load_image
 
 
 def test_attention_rollout_on_a_tiny_vit_is_a_unit_range_map_of_input_size():
@@ -124,3 +127,68 @@ def test_scoring_tolerates_a_rater_sheet_that_lacks_some_panels(tmp_path):
     assert (scores["rater1"]["n"], scores["rater2"]["n"], scores["agreement"]["n"]) == (3, 2, 2)
     with pytest.raises(ValueError, match="no review sheets"):
         score_review([])
+
+
+def _mil_checkpoint(tmp_path, classes, pooling="gated_attention"):
+    torch.manual_seed(0)
+    path = tmp_path / f"{pooling}.pt"
+    meta = {"modality": "microscopic", "bag": "isolate", "pooling": pooling, "attention_heads": 1, "attention_dim": 16,
+            "pooling_hierarchy": "none"}
+    model = (MILModel(build_model("small_cnn", len(classes), "none", 32), len(classes), pooling, 1, 16)
+             if pooling == "gated_attention" else build_model("small_cnn", len(classes), "none", 32))
+    save_checkpoint(path, model, "small_cnn", classes, 32, True, meta)
+    return path
+
+
+@pytest.fixture(scope="module")
+def isolates(synthetic_manifest):
+    df = select(load_manifest(synthetic_manifest), "microscopic", "cmu")
+    return df[df["group"].isin(df.groupby("species")["group"].first().head(3))]
+
+
+def test_explain_on_an_attention_mil_checkpoint_writes_one_panel_per_bag_with_instances_ordered_by_weight(
+        isolates, tmp_path):
+    ckpt = _mil_checkpoint(tmp_path, sorted(isolates["species"].unique()))
+    sheet = explain_images(ckpt, isolates["image_path"].tolist(), tmp_path / "xai",
+                           true_labels=isolates["species"].tolist(), bags=isolates["group"].tolist())
+    assert list(pd.read_csv(tmp_path / "xai" / "review_sheet.csv", keep_default_na=False).columns) == list(REVIEW_COLUMNS)
+    assert len(sheet) == isolates["group"].nunique()
+    assert set(sheet["level"]) == {"bag"}
+    assert all((tmp_path / "xai" / name).stat().st_size > 0 for name in sheet["panel"])
+    assert (sheet[[f"{r}_focus" for r in ("rater1", "rater2")]] == "").all().all()
+
+    model, _ = load_checkpoint(ckpt)
+    tf = build_transform(32, True, train=False)
+    key = pd.read_csv(tmp_path / "xai" / "review_key.csv", keep_default_na=False).set_index("bag")
+    for group, rows in isolates.groupby("group"):
+        x = torch.stack([tf(load_image(p, False, "microscopic")) for p in rows["image_path"]]).unsqueeze(0)
+        with torch.no_grad():
+            weights = model.attend(x, torch.ones(1, len(rows), dtype=torch.bool)).weights[0, :, 0].tolist()
+        expected = sorted(zip(weights, rows["image_path"]), reverse=True)
+        assert key.loc[group, "image_path"].split(";") == [p for _, p in expected]
+        assert [float(w) for w in key.loc[group, "attention"].split(";")] == pytest.approx([w for w, _ in expected],
+                                                                                           abs=1e-4)
+        assert key.loc[group, "level"] == "bag" and key.loc[group, "true_species"] == rows["species"].iat[0]
+
+
+def test_explain_on_a_mean_pooling_checkpoint_explains_images_and_says_why_there_is_no_bag_panel(
+        isolates, tmp_path, caplog):
+    ckpt = _mil_checkpoint(tmp_path, sorted(isolates["species"].unique()), pooling="mean")
+    with caplog.at_level(logging.INFO, logger="mycoscan"):
+        sheet = explain_images(ckpt, isolates["image_path"].tolist(), tmp_path / "xai", bags=isolates["group"].tolist())
+    assert set(sheet["level"]) == {"image"} and len(sheet) == len(isolates)
+    assert "no bag panel" in caplog.text and "mean" in caplog.text
+
+
+def test_review_command_on_an_attention_mil_checkpoint_samples_whole_bags_per_class(synthetic_manifest, tmp_path):
+    df = select(load_manifest(synthetic_manifest), "microscopic", "cmu")
+    ckpt = _mil_checkpoint(tmp_path, sorted(df["species"].unique()))
+    main(["explain", "--checkpoint", str(ckpt), "--manifest", str(synthetic_manifest), "--modality", "microscopic",
+          "--per-class", "1", "--out", str(tmp_path / "review")])
+    key = pd.read_csv(tmp_path / "review" / "review_key.csv", keep_default_na=False)
+    assert set(key["level"]) == {"bag"}
+    assert key.groupby("true_species").size().max() == 1
+    shown = select(load_manifest(synthetic_manifest), "microscopic", "all")  # the command samples every source
+    images_of = shown.groupby("group")["image_path"].apply(set)
+    for _, row in key.iterrows():
+        assert set(row["image_path"].split(";")) == images_of[row["bag"]]

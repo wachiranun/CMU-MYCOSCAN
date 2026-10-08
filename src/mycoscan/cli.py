@@ -95,9 +95,12 @@ def _eval(args) -> None:
 
 def _explain(args) -> None:
     from .explain import explain_images, sample_for_review
+    from .bags import with_bag_ids
     from .manifest import load_manifest
+    from .mil import ATTENTION_POOLINGS
+    from .models import read_metadata
 
-    labels = modalities = None
+    labels = modalities = bags = devices = None
     images = args.images
     if args.pool and not (args.manifest and args.splits_file):
         raise ValueError("--pool names a pool of a splits file: pass --manifest and --splits-file with it")
@@ -117,9 +120,16 @@ def _explain(args) -> None:
             df = df[in_pool]
             if df.empty:
                 raise ValueError(f"no images in pool {args.pool!r} of {args.splits_file}")
-        df = sample_for_review(df, args.per_class, args.seed)
+        meta = read_metadata(args.checkpoint)
+        if meta.get("pooling") in ATTENTION_POOLINGS:  # a bag panel per sampled bag, all of its images
+            df = with_bag_ids(df, meta["bag"])
+            df = df[df["bag"].isin(sample_for_review(df.drop_duplicates("bag"), args.per_class, args.seed)["bag"])]
+            bags, devices = df["bag"].tolist(), df["device"].astype(str).tolist()
+        else:
+            df = sample_for_review(df, args.per_class, args.seed)
         images, labels, modalities = df["image_path"].tolist(), df["species"].tolist(), df["modality"].tolist()
-    sheet = explain_images(args.checkpoint, images, args.out, args.device, labels, modalities, args.reveal)
+    sheet = explain_images(args.checkpoint, images, args.out, args.device, labels, modalities, args.reveal, bags,
+                           devices)
     print(f"{len(sheet)} panels, review_sheet.csv and review_key.csv (keep it from the raters) written to {args.out}")
 
 
@@ -277,7 +287,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--metric-config", help="TOML with label_map, genus_map, order_map, subgroups and calibration_bins")
     p.set_defaults(fn=_eval)
 
-    p = sub.add_parser("explain", help="Grad-CAM (CNN) or attention rollout (ViT) and SmoothGrad panels, plus a "
+    p = sub.add_parser("explain", help="Grad-CAM (CNN) or attention rollout (ViT) and SmoothGrad panels (a bag panel "
+                                       "ordered by attention for an attention-MIL model), plus a "
                                        "blinded two-rater review sheet")
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--out", required=True)
