@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .bags import BAG_MODES, POOLINGS
 from .metrics import TAU_RULES
+from .mil import ATTENTION_POOLINGS, HIERARCHIES
 from .models import PRETRAINED, resolve_weights
 
 CHOICES = {
@@ -20,7 +21,8 @@ CHOICES = {
     "split": {"holdout", "kfold", "loio", "image_random"},
     "tau_rule": set(TAU_RULES),
     "bag": set(BAG_MODES),
-    "pooling": set(POOLINGS),
+    "pooling": {*POOLINGS, *ATTENTION_POOLINGS},
+    "pooling_hierarchy": set(HIERARCHIES),
 }
 SUBGROUP_COLUMNS = {"modality", "view", "device", "day", "source", "genus", "temperature", "phase", "z_index"}
 
@@ -52,6 +54,9 @@ class Config:
     plate_crop: bool = False
     bag: str = "none"
     pooling: str = "mean"
+    pooling_hierarchy: str = "none"
+    attention_heads: int = 4
+    attention_dim: int = 128
     tile_grid: tuple[int, ...] = (3, 2)
     tile_size: int = 640
     split: str = "kfold"
@@ -111,6 +116,15 @@ class Config:
         if self.bag != "none" and self.finetune == "linear_probe":
             raise ValueError("config bag pools a network's instance predictions; finetune='linear_probe' "
                              "scores isolates by the mean of its images, so use bag='none'")
+        if self.pooling in ATTENTION_POOLINGS and self.bag == "none":
+            raise ValueError(f"config pooling={self.pooling!r} trains on bags; set bag to one of "
+                             f"{[b for b in BAG_MODES if b != 'none']}")
+        if self.pooling_hierarchy != "none" and (self.pooling not in ATTENTION_POOLINGS or self.bag != "isolate"):
+            raise ValueError("config pooling_hierarchy='device_then_isolate' pools an isolate bag's devices with "
+                             f"attention, so it needs bag='isolate' and pooling in {list(ATTENTION_POOLINGS)}; "
+                             "for mean or max, bag='isolate_device' already pools per device, then across devices")
+        if self.attention_heads < 1 or self.attention_dim < 1:
+            raise ValueError("config attention_heads and attention_dim must be >= 1")
         if self.calibration_bins < 1:
             raise ValueError("config calibration_bins must be >= 1")
         if not 0 < self.tau_target <= 1:

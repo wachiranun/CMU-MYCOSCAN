@@ -160,7 +160,11 @@ def prob_columns(classes: list[str]) -> list[str]:
 
 def aggregate_by_group(preds: pd.DataFrame, classes: list[str], pooling: str = "mean", key: str = "group") -> pd.DataFrame:
     """One row per group (the isolate for CMU data), or per value of `key`, from its rows' probabilities: their
-    mean, or with `max` each class's highest probability over the rows, renormalised to sum to 1."""
+    mean, or with `max` each class's highest probability over the rows, renormalised to sum to 1.
+    Attention pooling happens inside the model, so with it a group's several bag rows are averaged."""
+    from .mil import ATTENTION_POOLINGS
+
+    pooling = "mean" if pooling in ATTENTION_POOLINGS else pooling
     cols = prob_columns(classes)
     keep = {"species": "first", **({"group": "first"} if key != "group" else {})}
     table = preds.groupby(key).agg({**keep, **{c: pooling for c in cols}}).reset_index()
@@ -172,11 +176,14 @@ def aggregate_by_group(preds: pd.DataFrame, classes: list[str], pooling: str = "
 def split_levels(preds: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """A prediction table's image rows, and the rows its isolates are pooled from.
 
-    Without bag rows both are the image rows. With isolate or isolate-and-device bags (`level` image and bag),
+    Without bag rows both are the image rows. With isolate rows (attention-MIL's device-then-isolate
+    hierarchy), isolates are those rows. With isolate or isolate-and-device bags (`level` image and bag),
     isolates are pooled from the bag rows. With tile bags (`level` tile and bag) each bag is one image, so the
     bag rows are the images, and isolates are pooled from them."""
     if "level" not in preds:
         return preds, preds
+    if (preds["level"] == "isolate").any():  # attention-MIL's device-then-isolate hierarchy
+        return preds[preds["level"] == "image"], preds[preds["level"] == "isolate"]
     bags = preds[preds["level"] == "bag"]
     if bags.empty:
         return preds, preds

@@ -26,6 +26,7 @@ from .features import cache_key, cached_features
 from .losses import build_loss
 from .manifest import load_manifest, select
 from .metrics import choose_tau, evaluate_predictions, prob_columns
+from .mil import ATTENTION_POOLINGS, MILModel, attention_sidecars, attention_summary, predict_mil, training_batches
 from .models import (add_lora, add_to_checkpoint, apply_finetune, build_model, is_checkpoint, load_backbone,
                      load_checkpoint, lr_scales, merge_lora, require_peft, save_checkpoint, train_mode)
 from .probe import Probes, fit_probes, with_linear_head
@@ -62,12 +63,16 @@ def prepare_model(cfg: Config, n_classes: int) -> nn.Module:
 
 
 def build_optimizer(model: nn.Module, cfg: Config) -> torch.optim.Optimizer:
-    """AdamW over the trainable parameters, one group per learning rate that layer_decay assigns."""
-    scales = lr_scales(model, cfg.layer_decay)
+    """AdamW over the trainable parameters, one group per learning rate that layer_decay assigns.
+    An attention-MIL model's pooling and head learn at the full rate, as a head does."""
+    if isinstance(model, MILModel):
+        scales = {f"encoder.{k}": v for k, v in lr_scales(model.encoder, cfg.layer_decay).items()}
+    else:
+        scales = lr_scales(model, cfg.layer_decay)
     by_scale: dict[float, list[nn.Parameter]] = {}
     for name, param in model.named_parameters():
         if param.requires_grad:
-            by_scale.setdefault(scales[name], []).append(param)
+            by_scale.setdefault(scales.get(name, 1.0), []).append(param)
     groups = [{"params": params, "lr": cfg.lr * scale} for scale, params in sorted(by_scale.items(), reverse=True)]
     return torch.optim.AdamW(groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
@@ -85,14 +90,25 @@ def fit_model(train_df: pd.DataFrame, cfg: Config, classes: list[str], device: s
     seed_everything(seed)
     class_to_idx = {c: i for i, c in enumerate(classes)}
     model = prepare_model(cfg, len(classes))
-    model.to(device)
     tiles = tile_spec(cfg)
-    if tiles is not None:  # single-tile training; tiles are pooled into their image only when predicting
-        train_df = instances(train_df, "tiles", tiles)
-    loader = make_loader(train_df, class_to_idx, cfg.image_size, cfg.autocontrast, train=True,
-                         batch_size=cfg.batch_size, num_workers=cfg.num_workers, imbalance=cfg.imbalance, seed=seed,
-                         augmentation=cfg.augmentation, plate_crop=cfg.plate_crop, tiles=tiles)
-    labels = torch.tensor(train_df["species"].map(class_to_idx).to_numpy())
+    if cfg.pooling in ATTENTION_POOLINGS:  # the bag is the training unit
+        model = MILModel(model, len(classes), cfg.pooling, cfg.attention_heads, cfg.attention_dim,
+                         cfg.pooling_hierarchy)
+        batches, labels = training_batches(
+            instances(train_df, cfg.bag, tiles), class_to_idx,
+            build_transform(cfg.image_size, cfg.autocontrast, True, cfg.augmentation), cfg.batch_size,
+            cfg.imbalance, seed, cfg.pooling_hierarchy != "none", cfg.plate_crop, tiles, cfg.num_workers)
+    else:
+        if tiles is not None:  # single-tile training; tiles are pooled into their image only when predicting
+            train_df = instances(train_df, "tiles", tiles)
+        loader = make_loader(train_df, class_to_idx, cfg.image_size, cfg.autocontrast, train=True,
+                             batch_size=cfg.batch_size, num_workers=cfg.num_workers, imbalance=cfg.imbalance,
+                             seed=seed, augmentation=cfg.augmentation, plate_crop=cfg.plate_crop, tiles=tiles)
+        labels = torch.tensor(train_df["species"].map(class_to_idx).to_numpy())
+
+        def batches():
+            return (((x,), y) for x, y in loader)
+    model.to(device)
     loss_fn = build_loss(cfg.loss, labels, len(classes), cfg.label_smoothing, cfg.focal_gamma).to(device)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = build_optimizer(model, cfg)
@@ -107,10 +123,10 @@ def fit_model(train_df: pd.DataFrame, cfg: Config, classes: list[str], device: s
     for epoch in range(cfg.epochs):
         train_mode(model)
         total_loss, correct, seen = 0.0, 0, 0
-        for x, y in loader:
-            x, y = x.to(device), y.to(device)
+        for inputs, y in batches():
+            inputs, y = [t if t is None else t.to(device) for t in inputs], y.to(device)
             with torch.autocast(device_type, dtype=amp_dtype, enabled=cfg.amp):
-                logits = model(x)
+                logits = model(*inputs)
                 loss = loss_fn(logits, y)
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -194,21 +210,46 @@ def tile_spec(cfg: Config) -> TileSpec | None:
 
 
 def predict_table(model: nn.Module, df: pd.DataFrame, classes: list[str], fold: str, scoring: Scoring,
-                  device: str) -> pd.DataFrame:
+                  device: str) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     """The prediction table of `df`: a row per image, and with bags also a row per bag holding the pooled
-    probabilities and its instance count. With tile bags the instance rows are tiles, and a bag is an image."""
+    probabilities and its instance count. With tile bags the instance rows are tiles, and a bag is an image.
+    An attention-MIL model's instance rows score each instance as a bag of one; with a device-then-isolate
+    hierarchy the bag rows are its device bags and `level = "isolate"` rows hold the isolate predictions.
+
+    Also the sidecars to write beside the table, by file stem: attention-MIL's attention weights, else none."""
     if scoring.bag == "none":
         probs = predict_probs(model, df, classes, scoring.image_size, scoring.autocontrast, device,
                               scoring.batch_size, scoring.plate_crop)
-        return prediction_table(df, probs, classes, fold)
+        return prediction_table(df, probs, classes, fold), {}
     rows = instances(df, scoring.bag, scoring.tiles)
     transform = build_transform(scoring.image_size, scoring.autocontrast, train=False)
-    instance_probs, names, bag_probs = predict_bags(model, rows, transform, scoring.pooling, device,
-                                                    scoring.batch_size, scoring.plate_crop, scoring.tiles)
-    bags = bag_frame(rows, names, [c for c in PREDICTION_COLUMNS + ["pool"] if c in rows])
     level = "tile" if scoring.tiles else "image"
-    return pd.concat([prediction_table(rows, instance_probs, classes, fold, level=level),
-                      prediction_table(bags, bag_probs, classes, fold, level="bag")], ignore_index=True)
+    columns = [c for c in PREDICTION_COLUMNS + ["pool"] if c in rows]
+    if not isinstance(model, MILModel):
+        instance_probs, names, bag_probs = predict_bags(model, rows, transform, scoring.pooling, device,
+                                                        scoring.batch_size, scoring.plate_crop, scoring.tiles)
+        bags = bag_frame(rows, names, columns)
+        return pd.concat([prediction_table(rows, instance_probs, classes, fold, level=level),
+                          prediction_table(bags, bag_probs, classes, fold, level="bag")], ignore_index=True), {}
+    mil = predict_mil(model, rows, transform, device, scoring.batch_size, scoring.plate_crop, scoring.tiles)
+    tables = [prediction_table(rows, mil.instance_probs, classes, fold, level=level)]
+    if mil.device_names is not None and mil.device_probs is not None:
+        device_rows = rows.assign(bag=rows["bag"].astype(str) + "|" + rows["device"].astype(str))
+        tables.append(prediction_table(bag_frame(device_rows, mil.device_names, columns), mil.device_probs, classes,
+                                       fold, level="bag"))
+    tables.append(prediction_table(bag_frame(rows, mil.names, columns), mil.bag_probs, classes, fold,
+                                   level="isolate" if mil.device_names is not None else "bag"))
+    sidecars = {name: frame.assign(fold=fold) for name, frame in attention_sidecars(rows, mil).items()}
+    return pd.concat(tables, ignore_index=True), sidecars
+
+
+def write_sidecars(run_dir: Path, sidecars: list[dict[str, pd.DataFrame]]) -> dict:
+    """Each sidecar table, concatenated over folds, beside the predictions; the attention summary for metrics."""
+    names = list(dict.fromkeys(name for s in sidecars for name in s))
+    merged = {name: pd.concat([s[name] for s in sidecars if name in s], ignore_index=True) for name in names}
+    for name, frame in merged.items():
+        frame.to_csv(run_dir / f"{name}.csv", index=False)
+    return {"attention": attention_summary(merged)} if "attention" in merged else {}
 
 
 def plot_confusion(cm: list[list[int]], classes: list[str], path: Path, title: str) -> None:
@@ -344,7 +385,8 @@ def run_training(cfg: Config) -> Path:
         log.warning("split=image_random is leaky, comparison only: images of one group land on both sides of a split")
     meta = {"modality": cfg.modality, "source": cfg.source, "finetune": cfg.finetune, "weights_init": cfg.weights,
             "plate_crop": cfg.plate_crop, "leaky": leaky, "bag": cfg.bag, "pooling": cfg.pooling,
-            "tile_grid": list(cfg.tile_grid), "tile_size": cfg.tile_size}
+            "pooling_hierarchy": cfg.pooling_hierarchy, "attention_heads": cfg.attention_heads,
+            "attention_dim": cfg.attention_dim, "tile_grid": list(cfg.tile_grid), "tile_size": cfg.tile_size}
 
     if frozen:
         folds = frozen_folds(df)
@@ -398,6 +440,7 @@ def run_training(cfg: Config) -> Path:
         for k, fold in enumerate(folds):
             fold_started = start_cost(device)
             val_df = df.iloc[fold.val_idx]
+            sidecars: dict[str, pd.DataFrame] = {}
             if probe:
                 probes = _fit_probes(df.iloc[fold.train_idx], features[fold.train_idx], classes)
                 table = pd.concat([prediction_table(val_df, p, classes, fold.name, name)
@@ -405,13 +448,13 @@ def run_training(cfg: Config) -> Path:
                 model = with_linear_head(backbone, probes.linear_head())
             else:
                 model, histories[fold.name] = fit_model(df.iloc[fold.train_idx], cfg, classes, device, seed + k)
-                table = predict_table(model, val_df, classes, fold.name, scoring, device)
+                table, sidecars = predict_table(model, val_df, classes, fold.name, scoring, device)
             costs.append(cost_since(fold_started, device))
             fold_dir = seed_dir if holdout else seed_dir / "folds" / fold.name
             save_checkpoint(fold_dir / "model.pt", model, cfg.arch, classes, cfg.image_size, cfg.autocontrast,
                             {**meta, "fold": fold.name, "seed": seed})
             folds_done.append({"seed": seed, "fold": fold.name, "dir": fold_dir, "table": table.assign(leaky=leaky),
-                               "resources": costs[-1]})  # this fold's own cost
+                               "sidecars": sidecars, "resources": costs[-1]})  # this fold's own cost
         seed_runs[seed] = {"dir": seed_dir, "costs": costs, "histories": histories}
 
     tau = tau_from_development(cfg, [f["table"].assign(seed=f["seed"]) for f in folds_done], classes)
@@ -421,6 +464,7 @@ def run_training(cfg: Config) -> Path:
     if not holdout:
         for f in folds_done:
             fold_metrics = {**base, "seed": f["seed"], "fold": f["fold"], "resources": f["resources"],
+                            **write_sidecars(f["dir"], [f["sidecars"]]),
                             **evaluate_by_classifier(f["table"], classes, 0, f["seed"], **metric_options)}
             (f["dir"] / "metrics.json").write_text(json.dumps(fold_metrics, indent=2), encoding="utf-8")
             fold_scores.append(fold_metrics)
@@ -428,8 +472,9 @@ def run_training(cfg: Config) -> Path:
         seed_dir = run["dir"]
         seed_dir.mkdir(parents=True, exist_ok=True)
         tables = [f["table"] for f in folds_done if f["seed"] == seed]
+        attention = write_sidecars(seed_dir, [f["sidecars"] for f in folds_done if f["seed"] == seed])
         metrics = write_report(seed_dir, pd.concat(tables, ignore_index=True), classes, cfg.bootstrap, seed,
-                               {**base, "seed": seed, "fold": "holdout" if holdout else "pooled",
+                               {**base, **attention, "seed": seed, "fold": "holdout" if holdout else "pooled",
                                 "resources": total_cost(run["costs"]), "folds": fold_info,
                                 "train_history": run["histories"], "note": note}, **metric_options)
         if holdout:
@@ -551,12 +596,13 @@ def evaluate_checkpoint(checkpoint: str | Path, manifest: str | Path, out_dir: s
     if not metric_options.get("label_map"):
         resolve_classes(df, tuple(classes))
         metric_options["genus_map"] = genus_map_of(df, metric_options.get("genus_map", {}))
-    table = predict_table(model, df, classes, "eval", Scoring.of_checkpoint(meta), device)
+    table, sidecars = predict_table(model, df, classes, "eval", Scoring.of_checkpoint(meta), device)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     tau = meta.get("tau")
     return write_report(out_dir, table, classes, n_boot, seed,
-                        {"checkpoint": str(checkpoint), "manifest": str(manifest),
+                        {**write_sidecars(out_dir, [sidecars]), "checkpoint": str(checkpoint),
+                         "manifest": str(manifest),
                          "tau": {"value": tau, "source": "checkpoint", "selection": meta.get("tau_selection")},
                          "provenance": collect(manifest, checkpoint=checkpoint)},
                         **{"pooling": meta.get("pooling", "mean"), **metric_options, "tau": tau})

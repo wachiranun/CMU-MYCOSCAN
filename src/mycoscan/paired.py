@@ -27,6 +27,9 @@ from scipy.stats import wilcoxon
 from .models import is_checkpoint
 
 
+MIXED_TRANSFER = "mixed"  # the `weights` of a fused run whose branches differ in transfer role
+
+
 @dataclass(frozen=True)
 class PairedConfig:
     min_gain: float = 0.02  # macro-F1, so 0.02 is 2 points
@@ -67,6 +70,8 @@ def load_run(run_dir: str | Path) -> Run:
     cfg = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
     summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
     prov = summary["provenance"]
+    if cfg["weights"] == MIXED_TRANSFER:
+        raise ValueError(f"{run_dir} fuses a sequential and a direct branch, so it is neither sequential nor direct")
     return Run(name=summary.get("run_name", run_dir.name), arch=cfg["arch"], weights=cfg["weights"],
                seeds=list(prov["seeds"]), folds=list(prov["folds"]["names"]),
                membership=prov["folds"].get("per_fold_sha256", {}),

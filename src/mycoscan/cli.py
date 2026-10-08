@@ -1,5 +1,5 @@
 """mycoscan command line: env | make-synthetic | build-openfungi | partition | seal | train | sweep | eval | explain |
-predict | compare | paired | results | learning-curve | export-stage1 | score-review."""
+predict | compare | paired | fuse | results | learning-curve | export-stage1 | score-review."""
 from __future__ import annotations
 
 import argparse
@@ -176,6 +176,18 @@ def _paired(args) -> None:
         print(write_comparison(pairs, cfg, args.out))
 
 
+def _fuse(args) -> None:
+    from .fusion import fuse_runs
+
+    out = fuse_runs(args.colony, args.micro, args.out, args.method, args.colony_test, args.micro_test, args.bootstrap,
+                    args.seed, args.device)
+    m = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+    weight = f", colony weight {m['fusion']['weight']:.2f}" if "weight" in m["fusion"] else ""
+    print(f"fused ({args.method}{weight}): isolate acc={m['isolate_level']['accuracy']:.3f} "
+          f"macro-F1={m['isolate_level']['macro']['f1']:.3f}")
+    print(out)
+
+
 def _sweep(args) -> None:
     from .sweep import run_sweep
 
@@ -303,6 +315,20 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override a comparison key")
     p.add_argument("--out", help="write every pair, its differences and the thresholds to this JSON")
     p.set_defaults(fn=_paired)
+
+    p = sub.add_parser("fuse", help="late fusion of a colony run and a microscopy run at the isolate level, tuned "
+                                    "on development folds only")
+    p.add_argument("--colony", required=True, help="colony run directory")
+    p.add_argument("--micro", required=True, help="microscopy run directory")
+    p.add_argument("--out", required=True, help="fused run directory to write; its name is the run name")
+    p.add_argument("--method", choices=["weighted", "mlp"], default="weighted",
+                   help="weighted: a scalar colony weight; mlp: an MLP on both branches' cached embeddings")
+    p.add_argument("--colony-test", help="mycoscan eval directory of the colony final model on the test set")
+    p.add_argument("--micro-test", help="mycoscan eval directory of the microscopy final model on the test set")
+    p.add_argument("--bootstrap", type=int, default=2000)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device", default="auto", help="for --method mlp, to embed images not yet cached")
+    p.set_defaults(fn=_fuse)
 
     p = sub.add_parser("results", help="one CSV row per run and one per config cell, from every metrics.json under a directory")
     p.add_argument("root")

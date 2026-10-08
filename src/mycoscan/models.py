@@ -215,7 +215,13 @@ def add_to_checkpoint(path: Path, **fields) -> None:
 
 
 def load_checkpoint(path: str | Path, device: str = "cpu") -> tuple[nn.Module, dict]:
+    """The saved model and its metadata; an attention-MIL checkpoint comes back as its MILModel."""
+    from .mil import ATTENTION_POOLINGS, MILModel
+
     ckpt = torch.load(path, map_location=device, weights_only=False)
     model = build_model(ckpt["arch"], len(ckpt["classes"]), "none", ckpt["image_size"])
+    if ckpt.get("pooling") in ATTENTION_POOLINGS:
+        model = MILModel(model, len(ckpt["classes"]), ckpt["pooling"], ckpt["attention_heads"],
+                         ckpt["attention_dim"], ckpt.get("pooling_hierarchy", "none"))
     model.load_state_dict(ckpt["state_dict"])
     return model.to(device).eval(), ckpt

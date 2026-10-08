@@ -31,6 +31,7 @@ from torch import nn
 from torchvision import transforms as T
 
 from .metrics import cohen_kappa
+from .mil import ATTENTION_POOLINGS
 from .models import adapter, load_checkpoint
 from .transforms import build_transform, load_image
 
@@ -133,6 +134,9 @@ def explain_images(checkpoint: str | Path, images: list[str], out_dir: str | Pat
     and the panel titles only with `reveal`. modalities: one per image, for the plate crop; defaults to the
     checkpoint's modality."""
     model, meta = load_checkpoint(checkpoint, device)
+    if meta.get("pooling") in ATTENTION_POOLINGS:
+        raise ValueError(f"{checkpoint} is an attention-MIL model; its per-instance attention weights are in the "
+                         "run's attention.csv, and Grad-CAM explains single-image networks only")
     classes = meta["classes"]
     method = "attention_rollout" if is_vit(model) else "gradcam"
     layer = None if method == "attention_rollout" else model.get_submodule(adapter(model).cam_layer)
