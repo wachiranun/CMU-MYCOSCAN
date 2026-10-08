@@ -16,6 +16,8 @@ dependencies = [
     "pillow==12.3.0",
     "matplotlib==3.11.2",
     "timm==1.0.30",
+    "scikit-learn==1.9.1",
+    "imagehash==4.3.2",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +30,9 @@ dev = [
 mlflow = [
     "mlflow==3.16.1",
 ]
+lora = [
+    "peft==0.21.2",
+]
 
 [project.scripts]
 mycoscan = "mycoscan.cli:main"
@@ -39,3 +44,8 @@ where = ["src"]
 testpaths = ["tests"]
 markers = ["network: downloads pretrained weights; run with -m network"]
 addopts = "-m 'not network'"
+
+[tool.uv]
+# peft needs a current transformers; without this the resolver keeps the newest
+# huggingface-hub and backtracks transformers to a 2021 release peft cannot use.
+constraint-dependencies = ["transformers>=5"]

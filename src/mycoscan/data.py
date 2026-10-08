@@ -42,11 +42,17 @@ def class_loss_weights(labels: np.ndarray, n_classes: int) -> torch.Tensor:
     return torch.tensor(weights, dtype=torch.float32)
 
 
-def refuse_held_out(df: pd.DataFrame) -> None:
-    """A training loader never sees an external-test image: Pool B, or a sealed test split."""
+def held_out_mask(df: pd.DataFrame) -> pd.Series:
+    """Rows reserved for external testing: OpenFungi Pool B, or the sealed CMU test split."""
     held_out = df["split"].eq("test") if "split" in df else pd.Series(False, index=df.index)
     if "pool" in df:
         held_out |= df["pool"].eq("B")
+    return held_out
+
+
+def refuse_held_out(df: pd.DataFrame) -> None:
+    """A training loader never sees an external-test image."""
+    held_out = held_out_mask(df)
     if held_out.any():
         paths = df.loc[held_out, "image_path"].tolist()
         raise ValueError(f"training loader refused {len(paths)} held-out rows (Pool B or test): {', '.join(paths[:10])}")

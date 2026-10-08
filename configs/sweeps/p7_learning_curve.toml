@@ -1,0 +1,17 @@
+# P7: macro-F1 against training-set size. Each cell removes whole groups per class before folds are made.
+#   mycoscan sweep configs/sweeps/p7_learning_curve.toml
+#   mycoscan learning-curve runs/p7_learning_curve --x images --out runs/p7_learning_curve/curve.png
+base = "../openfungi_macro_well_supported.toml"
+name = "p7_learning_curve"
+
+[[cells]]
+train_fraction = 0.1
+
+[[cells]]
+train_fraction = 0.25
+
+[[cells]]
+train_fraction = 0.5
+
+[[cells]]
+train_fraction = 1.0

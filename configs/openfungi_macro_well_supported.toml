@@ -1,0 +1,18 @@
+# OpenFungi colony (macro) images, reported on the four well-supported classes only.
+# Fusarium (n=7) and Rhizopus (n=18) are under-powered; Mixed is excluded from the manifest.
+run_name = "openfungi_macro_well_supported"
+manifest = "data/openfungi/manifest.csv"
+splits_file = "data/openfungi/splits_v1.csv"
+source = "openfungi"
+modality = "colony"
+select_classes = [
+  "Aspergillus_section_Flavi", "Aspergillus_section_Nigri", "Alternaria_spp", "Penicillium_spp",
+]
+arch = "convnext_tiny"
+weights = "imagenet"
+finetune = "partial"
+split = "kfold"
+n_folds = 5
+seeds = [0, 1, 2]
+epochs = 20
+lr = 3e-4

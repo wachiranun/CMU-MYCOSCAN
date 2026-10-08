@@ -10,7 +10,7 @@ from .models import PRETRAINED, resolve_weights
 CHOICES = {
     "modality": {"colony", "microscopic", "all"},
     "source": {"cmu", "openfungi", "all"},
-    "finetune": {"head", "partial", "full"},
+    "finetune": {"head", "partial", "full", "lora", "linear_probe"},
     "imbalance": {"sampler", "none"},
     "loss": {"ce", "weighted_ce", "focal"},
     "augmentation": {"none", "standard", "trivial_wide"},
@@ -26,11 +26,17 @@ class Config:
     manifest: str
     output_dir: str = "runs"
     classes: tuple[str, ...] = ()
+    select_classes: tuple[str, ...] = ()
     modality: str = "microscopic"
     source: str = "cmu"
     arch: str = "densenet121"
     weights: str = "imagenet"
     finetune: str = "head"
+    partial_blocks: int = 1
+    lora_rank: int = 8
+    layer_decay: float = 0.8
+    ema: bool = False
+    ema_decay: float = 0.999
     image_size: int = 224
     autocontrast: bool = True
     imbalance: str = "sampler"
@@ -43,6 +49,7 @@ class Config:
     splits_file: str = ""
     n_folds: int = 5
     val_fraction: float = 0.2
+    train_fraction: float = 1.0
     fit_final: bool = True
     epochs: int = 15
     batch_size: int = 32
@@ -51,6 +58,7 @@ class Config:
     num_workers: int = 0
     device: str = "auto"
     seed: int = 42
+    seeds: tuple[int, ...] = ()
     bootstrap: int = 2000
     genus_map: dict = field(default_factory=dict)
     order_map: dict = field(default_factory=dict)
@@ -85,6 +93,21 @@ class Config:
             raise ValueError(f"config subgroups {bad} are not manifest columns; expected some of {sorted(SUBGROUP_COLUMNS)}")
         if not 0 < self.val_fraction < 1:
             raise ValueError("config val_fraction must be in (0, 1)")
+        if not 0 < self.train_fraction <= 1:
+            raise ValueError("config train_fraction must be in (0, 1]")
+        if self.partial_blocks < 1:
+            raise ValueError("config partial_blocks must be >= 1")
+        if self.lora_rank < 1:
+            raise ValueError("config lora_rank must be >= 1")
+        if not 0 < self.layer_decay <= 1:
+            raise ValueError("config layer_decay must be in (0, 1]; 1 turns layer-wise decay off")
+        if not 0 < self.ema_decay < 1:
+            raise ValueError("config ema_decay must be in (0, 1)")
+        if len(set(self.seeds)) != len(self.seeds):
+            raise ValueError(f"config seeds {list(self.seeds)} repeat a seed")
+        if self.finetune == "linear_probe" and len(self.seeds) > 1:
+            raise ValueError("config finetune='linear_probe' is deterministic on fixed features; "
+                             "more than one of seeds would repeat one result")
 
 
 def _coerce(raw: dict) -> dict:
@@ -92,7 +115,7 @@ def _coerce(raw: dict) -> dict:
     unknown = set(raw) - known
     if unknown:
         raise ValueError(f"unknown config keys: {sorted(unknown)}")
-    for key in ("classes", "subgroups"):
+    for key in ("classes", "select_classes", "subgroups", "seeds"):
         if key in raw:
             raw = {**raw, key: tuple(raw[key])}
     return raw
@@ -109,7 +132,11 @@ def parse_override(text: str) -> tuple[str, object]:
     return key.strip(), parsed
 
 
-def load_config(path: str | Path, overrides: list[str] = ()) -> Config:
+def config_with(path: str | Path, values: dict) -> Config:
+    """The config at `path` with `values` replacing its keys."""
     raw = tomllib.loads(Path(path).read_text(encoding="utf-8"))
-    raw.update(dict(parse_override(o) for o in overrides))
-    return Config(**_coerce(raw))
+    return Config(**_coerce({**raw, **values}))
+
+
+def load_config(path: str | Path, overrides: list[str] = ()) -> Config:
+    return config_with(path, dict(parse_override(o) for o in overrides))

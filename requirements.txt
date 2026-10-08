@@ -8,6 +8,8 @@ scipy==1.17.1
 pillow==12.3.0
 matplotlib==3.11.2
 timm==1.0.30
+scikit-learn==1.9.1
+imagehash==4.3.2
 pytest==9.1.1
 ipython>=8.0.0
 ipykernel>=6.0.0

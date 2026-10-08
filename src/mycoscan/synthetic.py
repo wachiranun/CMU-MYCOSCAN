@@ -129,17 +129,18 @@ def draw_yeast(m: Morphology, device: str, z: int, size: int, rng: np.random.Gen
     return img.filter(ImageFilter.GaussianBlur(radius=0.6 * z)) if z else img
 
 
-def near_duplicate(img: Image.Image, rng: np.random.Generator) -> Image.Image:
-    """A second shot of the same plate: slight reframing and exposure change."""
+def near_duplicate(img: Image.Image, rng: np.random.Generator, reframe: int = 16) -> Image.Image:
+    """A second shot of the same plate: reframing by up to 1/reframe of the image, and an exposure change."""
     w, h = img.size
-    dx, dy = (int(v) for v in rng.integers(1, max(2, w // 16), 2))
+    dx, dy = (int(v) for v in rng.integers(1, max(2, w // reframe), 2))
     cropped = img.crop((dx, dy, w - dx, h - dy)).resize((w, h))
     arr = np.asarray(cropped, float) * rng.uniform(0.9, 1.1)
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
 
 def make_synthetic(out_dir: str | Path, size: int = 128, fovs_per_device: int = 6, openfungi_per_genus: int = 24,
-                   seed: int = 0) -> Path:
+                   seed: int = 0, isolates_per_class: tuple[int, int] = (3, 2)) -> Path:
+    """isolates_per_class: CMU isolates of even- and odd-numbered classes."""
     out = Path(out_dir)
     (out / "images").mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
@@ -153,10 +154,11 @@ def make_synthetic(out_dir: str | Path, size: int = 128, fovs_per_device: int = 
 
     for c, species in enumerate(PLACEHOLDER_CMU_CLASSES):
         base = _morphology(rng)
-        for i in range(3 if c % 2 == 0 else 2):
+        for i in range(isolates_per_class[c % 2]):
             iso = f"CMU{c:02d}{i}"
             m = _jitter(base, rng)
-            common = {"species": species, "genus": GENUS_OF[species], "isolate_id": iso, "group_id": "", "source": "cmu"}
+            common = {"species": species, "genus": GENUS_OF[species], "isolate_id": iso, "group_id": "", "source": "cmu",
+                      "batch": f"B{i % 3}", "year": 2026 + i % 2}
             for view in ("obverse", "reverse"):
                 for day in DAYS:
                     save(draw_colony(m, view, day, size, rng), f"{iso}_colony_{view}_d{day}.png",
@@ -183,8 +185,34 @@ def make_synthetic(out_dir: str | Path, size: int = 128, fovs_per_device: int = 
             for shot, image in enumerate((img, near_duplicate(img, rng))):
                 save(image, f"{group}_shot{shot}.png", species=genus, genus=genus, isolate_id="", group_id=group,
                      modality=modality, view=view, device="unknown", day="", temperature="", phase="na",
-                     fov_id="", z_index="", source="openfungi")
+                     fov_id="", z_index="", source="openfungi", batch="", year="")
 
     manifest = out / "manifest.csv"
     pd.DataFrame(rows).to_csv(manifest, index=False)
     return manifest
+
+
+OPENFUNGI_FOLDERS = ("Aspergillus_section_Flavi", "Aspergillus_section_Nigri", "Alternaria_spp", "Rhizopus_spp")
+
+
+def make_openfungi_folders(out_dir: str | Path, size: int = 96, plates_per_class: int = 4, seed: int = 0) -> Path:
+    """The raw OpenFungi layout (`macro/<class>/*.jpg`, `micro/<class>/*.jpg`) without a manifest, as the
+    manifest builder finds it, plus a `Mixed` macro class. Plate p of a class is shot 1 + p % 3 times as
+    near-duplicates (reframed by 1-2 pixels, within the default pHash threshold), and its files are named `<class>_plate<p>_shot<s>.jpg`, so the planted groups are known."""
+    root = Path(out_dir)
+    rng = np.random.default_rng(seed)
+    for modality, classes in (("macro", (*OPENFUNGI_FOLDERS, "Mixed")), ("micro", OPENFUNGI_FOLDERS)):
+        for name in classes:
+            folder = root / modality / name
+            folder.mkdir(parents=True, exist_ok=True)
+            base = _morphology(rng)
+            for p in range(plates_per_class):
+                m = _jitter(base, rng)
+                if modality == "macro":
+                    img = draw_colony(m, ("obverse", "reverse")[p % 2], DAYS[p % 3], size, rng)
+                else:
+                    img = draw_micro(m, "microscope_camera", 0, size, rng)
+                shots = [img] + [near_duplicate(img, rng, reframe=48) for _ in range(p % 3)]
+                for s, shot in enumerate(shots):
+                    shot.save(folder / f"{name}_plate{p}_shot{s}.jpg", quality=95)
+    return root

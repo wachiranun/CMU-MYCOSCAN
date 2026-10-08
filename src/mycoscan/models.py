@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import cast
 
 import timm
@@ -101,6 +102,31 @@ def build_model(arch: str, n_classes: int, weights: str, image_size: int = 224) 
     return model
 
 
+def _block_ends(a: Adapter, names: list[str]) -> list[int]:
+    """Index in `names` (the model's modules in order) of the last module of each block."""
+    return [max(i for i, n in enumerate(names) if n == tap or n.startswith(tap + ".")) for tap in a.blocks]
+
+
+def lr_scales(model: nn.Module, layer_decay: float) -> dict[str, float]:
+    """Learning-rate multiplier per parameter: 1 for the head and anything after the last block,
+    layer_decay for the last block, layer_decay**2 for the one before, and so on, and one more step for
+    the stem: everything before the first block, such as a ViT's patch and position embeddings.
+    A tap without parameters (ResNet's stem activation) is not a block of its own."""
+    names = [n for n, _ in model.named_modules()]
+    index = {n: i for i, n in enumerate(names)}
+    a = adapter(model)
+    taps = tuple(t for t in a.blocks if any(True for _ in model.get_submodule(t).parameters()))
+    starts = [index[t] for t in taps]
+    ends = _block_ends(Adapter(a.head, taps, a.cam_layer), names)
+    scales = {}
+    for name, _ in model.named_parameters():
+        i = index[name.rpartition(".")[0]]
+        depth = len(taps) + 1 if i < starts[0] else len(taps) - next((k for k, end in enumerate(ends) if i <= end),
+                                                                       len(taps))
+        scales[name] = layer_decay ** depth
+    return scales
+
+
 def apply_finetune(model: nn.Module, mode: str, blocks: int = 1) -> None:
     """head: train only the new head (spec 2.2). partial: also the last `blocks` blocks and
     everything after them (final norms). full: everything."""
@@ -111,13 +137,43 @@ def apply_finetune(model: nn.Module, mode: str, blocks: int = 1) -> None:
         return
     names = [n for n, _ in model.named_modules()]
     if mode == "partial":
-        boundary = a.blocks[-blocks - 1]
-        end = max(i for i, n in enumerate(names) if n == boundary or n.startswith(boundary + "."))
+        end = _block_ends(a, names)[-blocks - 1]
         trainable = set(names[end + 1:])
     else:
         trainable = {n for n in names if n == a.head or n.startswith(a.head + ".")}
     for name, param in model.named_parameters():
         param.requires_grad = name.rpartition(".")[0] in trainable
+
+
+def require_peft() -> ModuleType:
+    try:
+        import peft
+    except ImportError as e:
+        raise ImportError('finetune = "lora" needs the optional extra: pip install "mycoscan[lora]"') from e
+    return peft
+
+
+def add_lora(model: nn.Module, rank: int) -> None:
+    """LoRA adapters of `rank` on every Linear layer outside the head; only the adapters and the head train."""
+    peft = require_peft()
+    head = adapter(model).head
+    targets = [n for n, m in model.named_modules()
+               if isinstance(m, nn.Linear) and n != head and not n.startswith(head + ".")]
+    if not targets:
+        raise ValueError(f"finetune='lora' adapts Linear layers, and {type(model).__name__} has none outside its head")
+    peft.inject_adapter_in_model(peft.LoraConfig(r=rank, lora_alpha=rank, target_modules=targets), model)
+    for name, param in model.named_parameters():
+        param.requires_grad = "lora_" in name or name.startswith(head + ".")
+
+
+def merge_lora(model: nn.Module) -> None:
+    """Fold each adapter into the weight it adapts, leaving a plain model that loads and predicts without peft."""
+    from peft.tuners.lora import LoraLayer
+
+    for name, module in list(model.named_modules()):
+        if isinstance(module, LoraLayer):
+            module.merge()
+            model.set_submodule(name, module.get_base_layer())
 
 
 def train_mode(model: nn.Module) -> None:

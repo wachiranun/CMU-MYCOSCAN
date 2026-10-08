@@ -17,6 +17,8 @@ Columns:
     fov_id      field-of-view identifier          (optional)
     z_index     Z-plane, integer or blank         (optional)
     sha256      hash of the image file            (optional)
+    batch       imaging batch                     (optional; sealing mixes batches across folds)
+    year        year of isolation or imaging      (optional; sealing mixes years across folds)
     split       reserved for the sealed CMU test set; a training loader refuses `test` rows
     fold        leave blank; a run with a splits file fills it from that file
 
@@ -33,6 +35,7 @@ REQUIRED = ("image_path", "species", "isolate_id", "modality")
 DEFAULTS = {
     "view": "na", "device": "unknown", "day": "", "source": "cmu", "group_id": "",
     "genus": "", "temperature": "", "phase": "na", "fov_id": "", "z_index": "", "sha256": "", "split": "", "fold": "",
+    "batch": "", "year": "",
 }
 ALLOWED = {
     "modality": {"colony", "microscopic"},
@@ -41,7 +44,7 @@ ALLOWED = {
     "source": {"cmu", "openfungi"},
     "phase": {"mold", "yeast", "na"},
 }
-INTEGER = ("day", "z_index", "temperature")
+INTEGER = ("day", "z_index", "temperature", "year")
 
 
 def load_manifest(path: str | Path, allow_ungrouped: bool = False) -> pd.DataFrame:

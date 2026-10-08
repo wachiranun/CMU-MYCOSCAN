@@ -1,0 +1,11 @@
+# Pseudo-grouping for the OpenFungi manifest builder (Plan 1, data preparation).
+#   mycoscan build-openfungi --root openfungi --out data/openfungi/manifest.csv --config configs/openfungi_manifest.toml
+# Two images are one plate when BOTH their pHash Hamming distance <= hamming_threshold
+# AND their embedding cosine distance < cosine_threshold. Inspect contact_sheets/ and tune.
+hamming_threshold = 8
+cosine_threshold = 0.15
+include_mixed = false          # the Mixed macro class is excluded unless set to true
+embed_arch = "vit_small_patch14_dinov2"
+embed_weights = "dino"
+embed_image_size = 224
+min_images = 20                # classes with fewer images are flagged as under-powered
