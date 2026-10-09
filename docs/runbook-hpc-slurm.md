@@ -45,7 +45,7 @@ Facts taken from the ERAWAN wiki on 2026-10-08. Verify the live numbers with `si
 | `mixed` | 1 node, 8 × A100, 128 CPUs | 24 h | 64 | 1 | 2 | Short GPU jobs that need more than 4 CPUs. |
 | `cpu` | 2 nodes, 192 CPUs | 168 h | 32 | 2 | 3 | `pytest`, results tables, learning curves, paired comparisons. |
 
-> **Two jobs at a time.** The `gpu` partition runs at most 2 of your jobs and queues at most 3. Chain stages inside one job or with `--dependency` rather than submitting many small jobs. Section 9 shows both.
+> **Two jobs at a time.** The `gpu` partition runs at most 2 of your jobs and queues at most 3. The queue limit counts every job you own that is still in `squeue`, including jobs held by `--dependency`, so a fourth `sbatch` fails with `QOSMaxSubmitJobPerUserLimit`. Chain stages inside one job or with `--dependency` rather than submitting many small jobs, and let a login-node waiter submit anything beyond three. Section 9 shows all three.
 
 Useful ERAWAN-specific commands: `myquota` (disk use), `mycredit` (credit balance in Baht), `htopc1` to `htopc4` and `nvtopc1` to `nvtopc4` (live CPU and GPU use on compute node 1 to 4).
 
@@ -392,7 +392,35 @@ sbatch --job-name=of-pretrain --time=12:00:00 jobs/train.sbatch configs/openfung
 
 ### 9.3 Backbone and recipe comparisons (P1 to P5) with dependency chains
 
-Use `--dependency=afterok` so a later job starts only when an earlier one succeeded, while staying inside the queued-job limit. `--parsable` makes `sbatch` print just the job ID.
+Use `--dependency=afterok` so a later job starts only when an earlier one succeeded. `--parsable` makes `sbatch` print just the job ID. Only three jobs can sit in the queue at once, and a job held by `--dependency` counts, so submit the first three directly and hand the fourth to a waiter that runs on the login node until a slot frees.
+
+Write the waiter once. It is a stand-in for `--dependency=afterok:<jobid>` that lives outside the queue: it sleeps until `<jobid>` has left `squeue` and fewer than three of your jobs remain, then submits only if `<jobid>` ended in state `COMPLETED`.
+
+```bash
+cat > /project/wachiranun.sir/mycoscan/jobs/submit-after.sh <<'EOF'
+#!/bin/bash
+# Usage: nohup jobs/submit-after.sh <jobid> <sbatch args ...> > logs/<name>.submit.log 2>&1 &
+# Login-node stand-in for --dependency=afterok:<jobid> when the 3-queued-jobs limit leaves
+# no room to hold the dependent job in the queue. Waits until <jobid> has left squeue and
+# fewer than QUEUE_LIMIT (default 3) of your jobs remain, then submits only if <jobid> COMPLETED.
+set -euo pipefail
+dep=$1; shift
+limit=${QUEUE_LIMIT:-3}
+while squeue -h -j "$dep" 2>/dev/null | grep -q . || [ "$(squeue -h -u "$USER" | wc -l)" -ge "$limit" ]; do
+  sleep 120
+done
+state=$(sacct -n -X -j "$dep" -o State | tr -d ' ')
+if [ "$state" != "COMPLETED" ]; then
+  echo "job $dep ended with state $state; not submitting: sbatch $*" >&2
+  exit 1
+fi
+echo "job $dep COMPLETED; submitting: sbatch $*"
+exec sbatch "$@"
+EOF
+chmod +x /project/wachiranun.sir/mycoscan/jobs/submit-after.sh
+```
+
+Then submit the chain. Three go straight to Slurm; the DINOv2 probe waits on the login node for `j2`.
 
 ```bash
 cd /project/wachiranun.sir/mycoscan
@@ -402,13 +430,15 @@ j2=$(sbatch --parsable --job-name=ws-convnext-in22k --time=48:00:00 jobs/train.s
        --set weights=imagenet22k --set run_name=openfungi_macro_ws_convnext_in22k)
 j3=$(sbatch --parsable --dependency=afterok:$j1 --job-name=ws-effnet --time=48:00:00 jobs/train.sbatch $CFG \
        --set arch=tf_efficientnetv2_s --set run_name=openfungi_macro_ws_effnetv2s)
-j4=$(sbatch --parsable --dependency=afterok:$j2 --job-name=ws-dinov2-probe --time=12:00:00 jobs/train.sbatch $CFG \
+nohup jobs/submit-after.sh $j2 --job-name=ws-dinov2-probe --time=12:00:00 jobs/train.sbatch $CFG \
        --set arch=vit_small_patch14_dinov2 --set weights=dino --set finetune=linear_probe \
-       --set seeds=[0] --set run_name=openfungi_macro_ws_dinov2_probe)
-echo "$j1 $j2 $j3 $j4"; squeue -u "$USER" -o "%.9i %.14j %.3t %.10M %.20R"
+       --set seeds=[0] --set run_name=openfungi_macro_ws_dinov2_probe > logs/ws-dinov2-probe.submit.log 2>&1 &
+echo "$j1 $j2 $j3"; squeue -u "$USER" -o "%.9i %.14j %.3t %.10M %.20R"
 ```
 
-> **Why afterok and not afterany.** A failed run should hold back the runs that will later be compared against it; `afterany` would start them regardless and burn credit. A job whose dependency failed stays pending with reason `DependencyNeverSatisfied`; cancel it with `scancel`.
+`nohup` keeps the waiter alive after you log out. `jobs -l` lists it while you are logged in, `pgrep -af submit-after` finds it afterwards, and the submit log shows the job ID once it fires. If the login node was rebooted, check the log before starting the waiter again; a second waiter would submit the probe twice.
+
+> **Why afterok and not afterany.** A failed run should hold back the runs that will later be compared against it; `afterany` would start them regardless and burn credit. A job whose dependency failed stays pending with reason `DependencyNeverSatisfied`; cancel it with `scancel`. The waiter applies the same rule: it logs the failed state and submits nothing.
 
 ### 9.4 P7 learning curve as one job
 
@@ -505,7 +535,7 @@ sbatch $G --job-name=xai-review "$PROJ"/jobs/cpu.sbatch mycoscan explain \
 | Disk and credit | `myquota`, `mycredit` |
 | Resource cost of a finished run | `python -c "import json;print(json.load(open('runs/<run>/metrics.json'))['resources'])"` |
 
-Email arrives at the address in `--mail-user` when a job ends or fails. A pending job with reason `Priority` or `Resources` will run; `QOSMaxJobsPerUserLimit` means you are over the 2-running limit; `PartitionTimeLimit` means `--time` exceeds the partition cap and the job will never start.
+Email arrives at the address in `--mail-user` when a job ends or fails. A pending job with reason `Priority` or `Resources` will run; `QOSMaxJobsPerUserLimit` means you are over the 2-running limit; `PartitionTimeLimit` means `--time` exceeds the partition cap and the job will never start. `sbatch` itself refusing with `QOSMaxSubmitJobPerUserLimit` means three of your jobs are already queued, dependency-held ones included; submit through `jobs/submit-after.sh` (section 9.3) or wait for one to finish.
 
 ## 12. Bring results back
 
@@ -546,6 +576,7 @@ Keep a second copy of anything irreplaceable (the frozen splits files, Stage-1 c
 | `CUDA out of memory` | Batch too large for the backbone or bag size | `--set batch_size=16`; keep `amp=true`. ViT-Base and attention-MIL bags are the usual culprits. |
 | State `TIMEOUT` in `sacct` | `--time` too short; no resume exists | Read the per-epoch timing in the log, resubmit with 1.5× the projected total. Lower `epochs` only as a deliberate, committed change. |
 | State `OUT_OF_MEMORY` (host RAM) | `--mem` too small, often during bootstrap CIs or linear-probe feature caching | Resubmit with `--mem=128G`; on `gpu-h100` or `mixed` you may also raise `--cpus-per-task`. |
+| `sbatch: error: QOSMaxSubmitJobPerUserLimit` at submit time | Three jobs already in `squeue`; jobs held by `--dependency` count | Nothing was submitted. Hand the job to `nohup jobs/submit-after.sh <jobid> ...` (section 9.3), or resubmit after one job ends. |
 | Job pending forever, reason `PartitionTimeLimit` | `--time` above the partition cap (168 h gpu, 120 h gpu-h100, 24 h mixed) | `scancel` and resubmit under the cap, or split the sweep. |
 | `Disk quota exceeded` | /project at 200 GB | `myquota`; remove `runs/*/folds/*/model.pt` of superseded runs, `data/synthetic`, and the smoke run. |
 | Run refuses to start: manifest hash differs from the splits file | Manifest was rebuilt after freezing `splits_v1.csv` | Restore the manifest that matches the sidecar hash (your `$PROJ` copy). Never regenerate a frozen split. |

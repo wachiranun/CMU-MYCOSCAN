@@ -143,7 +143,7 @@ footer{border-top:1px solid var(--line);color:var(--muted);font-size:13px;paddin
       <tr><td><code>cpu</code></td><td>2 nodes, 192 CPUs</td><td>168 h</td><td>32</td><td>2</td><td>3</td><td><code>pytest</code>, results tables, learning curves, paired comparisons.</td></tr>
     </tbody>
   </table></div>
-  <div class="warn"><p><strong>Two jobs at a time</strong>The <code>gpu</code> partition runs at most 2 of your jobs and queues at most 3. Chain stages inside one job or with <code>--dependency</code> rather than submitting many small jobs. Section 9 shows both.</p></div>
+  <div class="warn"><p><strong>Two jobs at a time</strong>The <code>gpu</code> partition runs at most 2 of your jobs and queues at most 3. The queue limit counts every job you own that is still in <code>squeue</code>, including jobs held by <code>--dependency</code>, so a fourth <code>sbatch</code> fails with <code>QOSMaxSubmitJobPerUserLimit</code>. Chain stages inside one job or with <code>--dependency</code> rather than submitting many small jobs, and let a login-node waiter submit anything beyond three. Section 9 shows all three.</p></div>
   <p>Useful ERAWAN-specific commands: <code>myquota</code> (disk use), <code>mycredit</code> (credit balance in Baht), <code>htopc1</code> to <code>htopc4</code> and <code>nvtopc1</code> to <code>nvtopc4</code> (live CPU and GPU use on compute node 1 to 4).</p>
 </section>
 
@@ -405,7 +405,30 @@ sbatch --job-name=p0-leaky   --time=06:00:00 jobs/train.sbatch configs/p0_small_
 sbatch --job-name=p0-grouped --time=06:00:00 jobs/train.sbatch configs/p0_small_cnn_micro_grouped.toml
 sbatch --job-name=of-pretrain --time=12:00:00 jobs/train.sbatch configs/openfungi_pretrain.toml</code></pre>
   <h3>9.3 Backbone and recipe comparisons (P1 to P5) with dependency chains</h3>
-  <p>Use <code>--dependency=afterok</code> so a later job starts only when an earlier one succeeded, while staying inside the queued-job limit. <code>--parsable</code> makes <code>sbatch</code> print just the job ID.</p>
+  <p>Use <code>--dependency=afterok</code> so a later job starts only when an earlier one succeeded. <code>--parsable</code> makes <code>sbatch</code> print just the job ID. Only three jobs can sit in the queue at once, and a job held by <code>--dependency</code> counts, so submit the first three directly and hand the fourth to a waiter that runs on the login node until a slot frees.</p>
+  <p>Write the waiter once. It is a stand-in for <code>--dependency=afterok:&lt;jobid&gt;</code> that lives outside the queue: it sleeps until <code>&lt;jobid&gt;</code> has left <code>squeue</code> and fewer than three of your jobs remain, then submits only if <code>&lt;jobid&gt;</code> ended in state <code>COMPLETED</code>.</p>
+<pre><button class="copy" type="button">Copy</button><code>cat &gt; /project/wachiranun.sir/mycoscan/jobs/submit-after.sh &lt;&lt;'EOF'
+#!/bin/bash
+# Usage: nohup jobs/submit-after.sh &lt;jobid&gt; &lt;sbatch args ...&gt; &gt; logs/&lt;name&gt;.submit.log 2&gt;&amp;1 &amp;
+# Login-node stand-in for --dependency=afterok:&lt;jobid&gt; when the 3-queued-jobs limit leaves
+# no room to hold the dependent job in the queue. Waits until &lt;jobid&gt; has left squeue and
+# fewer than QUEUE_LIMIT (default 3) of your jobs remain, then submits only if &lt;jobid&gt; COMPLETED.
+set -euo pipefail
+dep=$1; shift
+limit=${QUEUE_LIMIT:-3}
+while squeue -h -j "$dep" 2&gt;/dev/null | grep -q . || [ "$(squeue -h -u "$USER" | wc -l)" -ge "$limit" ]; do
+  sleep 120
+done
+state=$(sacct -n -X -j "$dep" -o State | tr -d ' ')
+if [ "$state" != "COMPLETED" ]; then
+  echo "job $dep ended with state $state; not submitting: sbatch $*" &gt;&amp;2
+  exit 1
+fi
+echo "job $dep COMPLETED; submitting: sbatch $*"
+exec sbatch "$@"
+EOF
+chmod +x /project/wachiranun.sir/mycoscan/jobs/submit-after.sh</code></pre>
+  <p>Then submit the chain. Three go straight to Slurm; the DINOv2 probe waits on the login node for <code>j2</code>.</p>
 <pre><button class="copy" type="button">Copy</button><code>cd /project/wachiranun.sir/mycoscan
 CFG=configs/openfungi_macro_well_supported.toml
 j1=$(sbatch --parsable --job-name=ws-convnext-in1k --time=48:00:00 jobs/train.sbatch $CFG)
@@ -413,11 +436,12 @@ j2=$(sbatch --parsable --job-name=ws-convnext-in22k --time=48:00:00 jobs/train.s
        --set weights=imagenet22k --set run_name=openfungi_macro_ws_convnext_in22k)
 j3=$(sbatch --parsable --dependency=afterok:$j1 --job-name=ws-effnet --time=48:00:00 jobs/train.sbatch $CFG \
        --set arch=tf_efficientnetv2_s --set run_name=openfungi_macro_ws_effnetv2s)
-j4=$(sbatch --parsable --dependency=afterok:$j2 --job-name=ws-dinov2-probe --time=12:00:00 jobs/train.sbatch $CFG \
+nohup jobs/submit-after.sh $j2 --job-name=ws-dinov2-probe --time=12:00:00 jobs/train.sbatch $CFG \
        --set arch=vit_small_patch14_dinov2 --set weights=dino --set finetune=linear_probe \
-       --set seeds=[0] --set run_name=openfungi_macro_ws_dinov2_probe)
-echo "$j1 $j2 $j3 $j4"; squeue -u "$USER" -o "%.9i %.14j %.3t %.10M %.20R"</code></pre>
-  <div class="note"><p><strong>Why afterok and not afterany</strong>A failed run should hold back the runs that will later be compared against it; <code>afterany</code> would start them regardless and burn credit. A job whose dependency failed stays pending with reason <code>DependencyNeverSatisfied</code>; cancel it with <code>scancel</code>.</p></div>
+       --set seeds=[0] --set run_name=openfungi_macro_ws_dinov2_probe &gt; logs/ws-dinov2-probe.submit.log 2&gt;&amp;1 &amp;
+echo "$j1 $j2 $j3"; squeue -u "$USER" -o "%.9i %.14j %.3t %.10M %.20R"</code></pre>
+  <p><code>nohup</code> keeps the waiter alive after you log out. <code>jobs -l</code> lists it while you are logged in, <code>pgrep -af submit-after</code> finds it afterwards, and the submit log shows the job ID once it fires. If the login node was rebooted, check the log before starting the waiter again; a second waiter would submit the probe twice.</p>
+  <div class="note"><p><strong>Why afterok and not afterany</strong>A failed run should hold back the runs that will later be compared against it; <code>afterany</code> would start them regardless and burn credit. A job whose dependency failed stays pending with reason <code>DependencyNeverSatisfied</code>; cancel it with <code>scancel</code>. The waiter applies the same rule: it logs the failed state and submits nothing.</p></div>
   <h3>9.4 P7 learning curve as one job</h3>
   <p><code>mycoscan sweep</code> runs its cells one after another in a single process, so the whole sweep is one Slurm job. Give it the sum of the cells' times. Four cells of 3-seed 5-fold ConvNeXt-Tiny fit comfortably in 72 hours on an A100.</p>
 <pre><button class="copy" type="button">Copy</button><span class="file">/project/wachiranun.sir/mycoscan/jobs/sweep.sbatch</span><code>cat &gt; /project/wachiranun.sir/mycoscan/jobs/sweep.sbatch &lt;&lt;'EOF'
@@ -498,7 +522,7 @@ sbatch --dependency=afterok:$s:$d --job-name=m1-paired jobs/cpu.sbatch \
       <tr><td>Resource cost of a finished run</td><td><code>python -c "import json;print(json.load(open('runs/&lt;run&gt;/metrics.json'))['resources'])"</code></td></tr>
     </tbody>
   </table></div>
-  <p>Email arrives at the address in <code>--mail-user</code> when a job ends or fails. A pending job with reason <code>Priority</code> or <code>Resources</code> will run; <code>QOSMaxJobsPerUserLimit</code> means you are over the 2-running limit; <code>PartitionTimeLimit</code> means <code>--time</code> exceeds the partition cap and the job will never start.</p>
+  <p>Email arrives at the address in <code>--mail-user</code> when a job ends or fails. A pending job with reason <code>Priority</code> or <code>Resources</code> will run; <code>QOSMaxJobsPerUserLimit</code> means you are over the 2-running limit; <code>PartitionTimeLimit</code> means <code>--time</code> exceeds the partition cap and the job will never start. <code>sbatch</code> itself refusing with <code>QOSMaxSubmitJobPerUserLimit</code> means three of your jobs are already queued, dependency-held ones included; submit through <code>jobs/submit-after.sh</code> (section 9.3) or wait for one to finish.</p>
 </section>
 
 <section id="results">
@@ -530,6 +554,7 @@ Get-ChildItem runs</code></pre>
       <tr><td><code>CUDA out of memory</code></td><td>Batch too large for the backbone or bag size</td><td><code>--set batch_size=16</code>; keep <code>amp=true</code>. ViT-Base and attention-MIL bags are the usual culprits.</td></tr>
       <tr><td>State <code>TIMEOUT</code> in <code>sacct</code></td><td><code>--time</code> too short; no resume exists</td><td>Read the per-epoch timing in the log, resubmit with 1.5× the projected total. Lower <code>epochs</code> only as a deliberate, committed change.</td></tr>
       <tr><td>State <code>OUT_OF_MEMORY</code> (host RAM)</td><td><code>--mem</code> too small, often during bootstrap CIs or linear-probe feature caching</td><td>Resubmit with <code>--mem=128G</code>; on <code>gpu-h100</code> or <code>mixed</code> you may also raise <code>--cpus-per-task</code>.</td></tr>
+      <tr><td><code>sbatch: error: QOSMaxSubmitJobPerUserLimit</code> at submit time</td><td>Three jobs already in <code>squeue</code>; jobs held by <code>--dependency</code> count</td><td>Nothing was submitted. Hand the job to <code>nohup jobs/submit-after.sh &lt;jobid&gt; ...</code> (section 9.3), or resubmit after one job ends.</td></tr>
       <tr><td>Job pending forever, reason <code>PartitionTimeLimit</code></td><td><code>--time</code> above the partition cap (168 h gpu, 120 h gpu-h100, 24 h mixed)</td><td><code>scancel</code> and resubmit under the cap, or split the sweep.</td></tr>
       <tr><td><code>Disk quota exceeded</code></td><td>/project at 200 GB</td><td><code>myquota</code>; remove <code>runs/*/folds/*/model.pt</code> of superseded runs, <code>data/synthetic</code>, and the smoke run.</td></tr>
       <tr><td>Run refuses to start: manifest hash differs from the splits file</td><td>Manifest was rebuilt after freezing <code>splits_v1.csv</code></td><td>Restore the manifest that matches the sidecar hash (your <code>$PROJ</code> copy). Never regenerate a frozen split.</td></tr>
