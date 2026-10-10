@@ -491,7 +491,8 @@ Edit `configs/openfungi_stage1_micro.toml` first so its `arch` and recipe match 
 ```bash
 source /project/wachiranun.sir/mycoscan/env.sh && cd "$REPO"
 mycoscan results runs --out runs/plan1_table.csv                        # light; fine on the login node
-mycoscan compare runs/openfungi_macro_well_supported runs/openfungi_macro_ws_convnext_in22k
+# multi-seed runs keep metrics.json per seed (seed0/, seed1/, ...); the run root holds only summary.json
+mycoscan compare runs/openfungi_macro_well_supported/seed0 runs/openfungi_macro_ws_convnext_in22k/seed0
 G="--partition=gpu --gpus=1 --cpus-per-task=4 --mem=32G --time=01:00:00"
 sbatch $G --job-name=xai-review "$PROJ"/jobs/cpu.sbatch mycoscan explain \
     --checkpoint runs/openfungi_macro_well_supported/model.pt --manifest data/openfungi/manifest.csv \
